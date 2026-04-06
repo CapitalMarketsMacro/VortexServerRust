@@ -1,0 +1,8 @@
+target/
+dist/
+conan_output/
+.cache
+.clangd
+.DS_Store
+*.so
+*~

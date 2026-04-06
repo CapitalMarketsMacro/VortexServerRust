@@ -1,0 +1,73 @@
+#  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+#  ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+#  ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+#  ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+#  ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+#  ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+#  ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+#  ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+#  ┃ This file is part of the Perspective library, distributed under the terms ┃
+#  ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+#  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+[package]
+name = "perspective-server"
+version = "4.3.0"
+authors = ["Andrew Stein <steinlink@gmail.com>"]
+edition = "2024"
+description = "A data visualization and analytics component, especially well-suited for large and/or streaming datasets."
+repository = "https://github.com/perspective-dev/perspective"
+license = "Apache-2.0"
+homepage = "https://perspective-dev.github.io"
+keywords = []
+build = "build.rs"
+include = [
+    "src/**/*",
+    "build.rs",
+    "include/**/*",
+    "cpp/**/*",
+    "docs/**/*",
+    "cmake/**/*",
+    "conanfile.py",
+    "conan/**/*",
+    "Cargo.toml",
+]
+
+[features]
+default = []
+external-cpp = []
+disable-cpp = []
+bundled-protoc = ["protobuf-src"]
+
+[build-dependencies]
+cmake = "0.1.50"
+num_cpus = "^1.15.0"
+shlex = "1.3.0"
+protobuf-src = { version = "2.1.1", optional = true }
+which = "7"
+
+[dependencies]
+perspective-client = { version = "4.3.0", path = "../perspective-client" }
+
+# Key order is frequently implicitly relied upon in dynamic languages, so for
+# convenience we try to provide this (as well as explicit metadata calls).
+indexmap = { version = "2.2.6", features = ["serde"] }
+
+# Convenient way to crawl the C++ static archive path
+link-cplusplus = "1.0.12"
+
+async-lock = "2.5.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0.107", features = ["raw_value"] }
+tracing = { version = ">=0.1.36" }
+thiserror = { version = "1.0.55" }
+futures = "0.3"
+
+[dependencies.prost]
+version = "0.12.3"
+default-features = false
+features = ["prost-derive", "std"]
+
+[lib]
+crate-type = ["rlib"]
+path = "src/lib.rs"

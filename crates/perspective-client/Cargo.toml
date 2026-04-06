@@ -1,0 +1,96 @@
+#  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+#  ┃ ██████ ██████ ██████       █      █      █      █      █ █▄  ▀███ █       ┃
+#  ┃ ▄▄▄▄▄█ █▄▄▄▄▄ ▄▄▄▄▄█  ▀▀▀▀▀█▀▀▀▀▀ █ ▀▀▀▀▀█ ████████▌▐███ ███▄  ▀█ █ ▀▀▀▀▀ ┃
+#  ┃ █▀▀▀▀▀ █▀▀▀▀▀ █▀██▀▀ ▄▄▄▄▄ █ ▄▄▄▄▄█ ▄▄▄▄▄█ ████████▌▐███ █████▄   █ ▄▄▄▄▄ ┃
+#  ┃ █      ██████ █  ▀█▄       █ ██████      █      ███▌▐███ ███████▄ █       ┃
+#  ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+#  ┃ Copyright (c) 2017, the Perspective Authors.                              ┃
+#  ┃ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ ┃
+#  ┃ This file is part of the Perspective library, distributed under the terms ┃
+#  ┃ of the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). ┃
+#  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+[package]
+name = "perspective-client"
+version = "4.3.0"
+authors = ["Andrew Stein <steinlink@gmail.com>"]
+edition = "2024"
+description = "A data visualization and analytics component, especially well-suited for large and/or streaming datasets."
+repository = "https://github.com/perspective-dev/perspective"
+license = "Apache-2.0"
+homepage = "https://perspective-dev.github.io"
+keywords = []
+links = "perspective_client"
+include = [
+    "src/**/*",
+    "Cargo.toml",
+    "package.json",
+    "build.rs",
+    "docs/**/*",
+    "perspective.proto",
+]
+
+[features]
+default = []
+
+# Removes the `Send` restriction from core `Future` traits, allowing easier
+# integration with wasm while respecting compat with rust-analyzer and metadata.
+sendable = []
+
+# Should the project build the `proto.rs` via protoc from source or assume it
+# already exists?
+generate-proto = []
+
+# Should the project build protobuf from source? If not, building this crate
+# requires PROTOC be set in the environment
+protobuf-src = ["dep:protobuf-src"]
+
+# When generating metadata, we can't rely on its existence - so enable this
+# to skip metadata generation. This currently only affects docs.
+omit_metadata = []
+
+# Should `talc` be used as a global allocator? Allows enhanced runtime metrics
+# via `Client::system_info`.
+talc-allocator = ["talc"]
+
+[lib]
+crate-type = ["rlib"]
+path = "src/rust/lib.rs"
+
+
+[build-dependencies]
+prost-build = { version = "0.12.3" }
+
+# https://github.com/abseil/abseil-cpp/issues/1241#issuecomment-2138616329
+protobuf-src = { version = "2.1.1", optional = true }
+
+[dependencies]
+arrow-array = { version = "57.3.0", default-features = false }
+arrow-ipc = { version = "57.3.0", default-features = false }
+arrow-schema = { version = "57.3.0", default-features = false }
+async-lock = { version = "2.5.0" }
+futures = { version = "0.3.28" }
+indexmap = { version = "2.2.6", features = ["serde"] }
+itertools = { version = "0.10.1" }
+paste = { version = "1.0.12" }
+prost-types = { version = "0.12.3" }
+
+# `rand` dependency that needs features unified.
+getrandom = { version = "0", features = ["wasm_js"] }
+num-traits = "0.2.19"
+rand = { version = ">=0.9,<1" }
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = { version = "0.11" }
+serde_json = { version = "1.0.107", features = ["raw_value", "preserve_order"] }
+talc = { version = "4.4.3", features = ["counters"], optional = true }
+thiserror = { version = "1.0.55" }
+tracing = { version = "0.1.36" }
+
+[dependencies.prost]
+version = "0.12.3"
+default-features = false
+features = ["prost-derive", "std"]
+
+[dependencies.ts-rs]
+version = "11.0.1"
+features = ["serde-json-impl", "no-serde-warnings", "import-esm"]
