@@ -4,5 +4,10 @@ conan_output/
 .cache
 .clangd
 .DS_Store
+.idea/
 *.so
 *~
+
+# Conan download cache metadata (only the tarball is needed)
+vendor/conan-sources/locks/
+vendor/conan-sources/s/
