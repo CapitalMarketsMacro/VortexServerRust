@@ -1,6 +1,7 @@
 include(default)
 
 [settings]
+compiler.cppstd=17
 arch=armv8
 build_type=Release
 

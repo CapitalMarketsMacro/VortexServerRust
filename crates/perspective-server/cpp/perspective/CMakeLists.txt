@@ -65,20 +65,12 @@ endif()
 
 if (WIN32)
     add_compile_options("/EHsc")
-    if(NOT PSP_USE_CONAN)
-        # Static CRT for non-Conan builds. When Conan is active,
-        # the Conan toolchain sets the runtime library from the profile.
-        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    endif()
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 
 if(WIN32)
-    if(PSP_USE_CONAN)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /MP /c /bigobj")
-    else()
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /MP /MT /c /bigobj")
-    endif()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /MP /MT /c /bigobj")
 endif()
 
 # # Helper function
@@ -610,11 +602,7 @@ set(WASM_SOURCE_FILES ${SOURCE_FILES})
 message("${BUILD_MESSAGE}\n")
 
 if(WIN32)
-    if(PSP_USE_CONAN)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /MP /c /bigobj")
-    else()
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /MP /MT /c /bigobj")
-    endif()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc /MP /MT /c /bigobj")
 endif()
 
 set(PSP_EXPORTED_FUNCTIONS 

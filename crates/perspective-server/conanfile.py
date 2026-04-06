@@ -9,9 +9,6 @@ class PerspectiveServerConan(ConanFile):
     generators = "CMakeToolchain", "CMakeDeps", "VirtualBuildEnv"
 
     def requirements(self):
-        # Pin versions that have pre-built binaries on conancenter
-        # for MSVC 194, shared=False, runtime=dynamic, cppstd=14/17.
-        # Only Arrow builds from source (due to with_csv=True).
         self.requires("arrow/18.1.0")
         self.requires("protobuf/5.27.0")
         self.requires("re2/20240702")
@@ -26,11 +23,10 @@ class PerspectiveServerConan(ConanFile):
         self.requires("abseil/20250127.0", force=True)
 
     def configure(self):
-        # Arrow: enable CSV (forces source build for Arrow only).
-        # All other options match the conancenter pre-built binary
-        # so transitive deps (boost, thrift, zlib, etc.) are pre-built.
+        # Arrow: enable CSV, disable everything else to minimize deps.
         self.options["arrow"].with_csv = True
         self.options["arrow"].with_json = False
+        self.options["arrow"].parquet = False
         self.options["arrow"].with_flight_rpc = False
         self.options["arrow"].gandiva = False
         self.options["arrow"].with_re2 = False
@@ -39,9 +35,9 @@ class PerspectiveServerConan(ConanFile):
         self.options["arrow"].with_bz2 = False
         self.options["arrow"].with_lz4 = False
         self.options["arrow"].with_snappy = False
+        self.options["arrow"].with_zlib = False
         self.options["arrow"].with_zstd = False
-        # Keep parquet, with_thrift, with_zlib, with_boost at defaults
-        # to match pre-built binary and avoid dep conflicts.
+        self.options["arrow"].with_thrift = False
 
     def layout(self):
         cmake_layout(self)
