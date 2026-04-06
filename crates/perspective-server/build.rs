@@ -51,17 +51,30 @@ fn find_protoc() -> PathBuf {
     }
 }
 
-/// Find protoc optionally — returns None if not found.
+/// Check if a protoc binary actually works (not just exists).
+/// On older Linux systems, pre-built protoc may require newer glibc.
+fn protoc_works(path: &Path) -> bool {
+    Command::new(path)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Find protoc optionally — returns None if not found or not working.
 /// CMake's FindProtoc.cmake will download protoc if we don't provide it.
 fn find_protoc_optional() -> Option<PathBuf> {
     if let Some(p) = find_protoc_from_conan() {
-        println!("cargo:warning=Using protoc from Conan: {}", p.display());
-        return Some(p);
+        if protoc_works(&p) {
+            println!("cargo:warning=Using protoc from Conan: {}", p.display());
+            return Some(p);
+        }
+        println!("cargo:warning=Conan protoc found but doesn't run (glibc mismatch?)");
     }
 
     if let Ok(protoc) = std::env::var("PROTOC") {
         let p = PathBuf::from(&protoc);
-        if p.exists() {
+        if p.exists() && protoc_works(&p) {
             println!("cargo:warning=Using PROTOC from environment: {protoc}");
             return Some(p);
         }
@@ -77,10 +90,12 @@ fn find_protoc_optional() -> Option<PathBuf> {
     #[allow(unreachable_code)]
     {
         if let Ok(p) = which::which("protoc") {
-            println!("cargo:warning=Using system protoc: {}", p.display());
-            return Some(p);
+            if protoc_works(&p) {
+                println!("cargo:warning=Using system protoc: {}", p.display());
+                return Some(p);
+            }
         }
-        println!("cargo:warning=protoc not found — CMake will download it");
+        println!("cargo:warning=No working protoc found — CMake will download it");
         None
     }
 }

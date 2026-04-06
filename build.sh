@@ -109,30 +109,30 @@ echo
 echo "--- Locating protoc ---"
 echo
 
-# Find protoc from Conan's package cache, VirtualBuildEnv, or system PATH
+# Find a working protoc — verify it actually runs (glibc compat check)
 PROTOC_BIN=""
 
-# Try sourcing Conan build env scripts
-for f in "$CONAN_DIR/conan_output/build/generators/conanbuild.sh" \
-         "$CONAN_DIR/conan_output/conanbuild.sh"; do
-    [ -f "$f" ] && source "$f" 2>/dev/null
-done
-
-# Search Conan package cache for protoc binary
-if [ -z "$PROTOC_BIN" ]; then
-    PROTOC_BIN=$(find ~/.conan2/p/ -name "protoc" -type f -executable 2>/dev/null | head -1)
-fi
-
-# Fall back to system PATH
-if [ -z "$PROTOC_BIN" ] && command -v protoc &>/dev/null; then
+# Try system PATH first
+if command -v protoc &>/dev/null && protoc --version &>/dev/null; then
     PROTOC_BIN="$(which protoc)"
 fi
 
+# Try Conan package cache
+if [ -z "$PROTOC_BIN" ]; then
+    for p in $(find ~/.conan2/p/ -name "protoc" -type f -executable 2>/dev/null); do
+        if "$p" --version &>/dev/null; then
+            PROTOC_BIN="$p"
+            break
+        fi
+    done
+fi
+
 if [ -n "$PROTOC_BIN" ]; then
-    echo "  [OK] protoc: $PROTOC_BIN"
+    echo "  [OK] protoc: $PROTOC_BIN ($($PROTOC_BIN --version 2>&1))"
     export PROTOC="$PROTOC_BIN"
 else
-    echo "  [WARN] protoc not found — will try bundled-protoc"
+    echo "  [INFO] protoc not found locally — CMake will download it"
+    unset PROTOC
 fi
 
 echo
