@@ -1,7 +1,6 @@
 include(default)
 
 [settings]
-compiler.runtime=static
 build_type=Release
 
 [options]
