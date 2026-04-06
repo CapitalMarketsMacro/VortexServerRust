@@ -51,6 +51,40 @@ fn find_protoc() -> PathBuf {
     }
 }
 
+/// Find protoc optionally — returns None if not found.
+/// CMake's FindProtoc.cmake will download protoc if we don't provide it.
+fn find_protoc_optional() -> Option<PathBuf> {
+    if let Some(p) = find_protoc_from_conan() {
+        println!("cargo:warning=Using protoc from Conan: {}", p.display());
+        return Some(p);
+    }
+
+    if let Ok(protoc) = std::env::var("PROTOC") {
+        let p = PathBuf::from(&protoc);
+        if p.exists() {
+            println!("cargo:warning=Using PROTOC from environment: {protoc}");
+            return Some(p);
+        }
+    }
+
+    #[cfg(feature = "bundled-protoc")]
+    {
+        let p = protobuf_src::protoc();
+        println!("cargo:warning=Using bundled protoc: {}", p.display());
+        return Some(p);
+    }
+
+    #[allow(unreachable_code)]
+    {
+        if let Ok(p) = which::which("protoc") {
+            println!("cargo:warning=Using system protoc: {}", p.display());
+            return Some(p);
+        }
+        println!("cargo:warning=protoc not found — CMake will download it");
+        None
+    }
+}
+
 /// Search the Conan output directory for the protoc binary.
 fn find_protoc_from_conan() -> Option<PathBuf> {
     let generators_dir = Path::new("conan_output").join("build").join("generators");
@@ -262,13 +296,16 @@ fn cmake_build() -> Result<Option<PathBuf>, std::io::Error> {
     dst.define("RAPIDJSON_BUILD_EXAMPLES", "OFF");
     dst.define("ARROW_CXX_FLAGS_DEBUG", "-Wno-error");
 
-    let protoc_path = find_protoc();
-    dst.define(
-        "PSP_PROTOC_PATH",
-        protoc_path
-            .parent()
-            .expect("protoc path returned root path or empty string"),
-    );
+    // Find protoc if available — if not, CMake's FindProtoc.cmake
+    // will download it automatically from GitHub.
+    if let Some(protoc_path) = find_protoc_optional() {
+        dst.define(
+            "PSP_PROTOC_PATH",
+            protoc_path
+                .parent()
+                .expect("protoc path returned root path or empty string"),
+        );
+    }
     dst.define("CMAKE_COLOR_DIAGNOSTICS", "ON");
     dst.define(
         "PSP_PROTO_PATH",
