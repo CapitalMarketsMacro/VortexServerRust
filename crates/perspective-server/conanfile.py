@@ -9,8 +9,11 @@ class PerspectiveServerConan(ConanFile):
     generators = "CMakeToolchain", "CMakeDeps", "VirtualBuildEnv"
 
     def build_requirements(self):
-        # protoc compiler needed at build time for .proto code generation
-        self.tool_requires("protobuf/<host_version>")
+        # protoc compiler needed at build time for .proto code generation.
+        # Only on Linux/macOS where protoc isn't typically installed system-wide.
+        # On Windows, protoc is found from Conan's package cache or PROTOC env var.
+        if self.settings.os != "Windows":
+            self.tool_requires("protobuf/<host_version>")
 
     def requirements(self):
         # Latest versions with pre-built MSVC 194 binaries on conancenter.
