@@ -95,6 +95,14 @@ echo
 
 CONAN_ARGS=(install "$CONAN_DIR" --output-folder "$CONAN_DIR/conan_output" --build=missing)
 [ -f "$PROFILE_FILE" ] && CONAN_ARGS+=(--profile:host "$PROFILE_FILE")
+VENDOR_SOURCES="$CONAN_DIR/vendor/conan-sources"
+if [ -d "$VENDOR_SOURCES" ]; then
+    CONAN_HOME=$(conan config home)
+    GLOBAL_CONF="$CONAN_HOME/global.conf"
+    if ! grep -q "core.sources:download_cache" "$GLOBAL_CONF" 2>/dev/null; then
+        echo "core.sources:download_cache=$VENDOR_SOURCES" >> "$GLOBAL_CONF"
+    fi
+fi
 conan "${CONAN_ARGS[@]}"
 
 echo

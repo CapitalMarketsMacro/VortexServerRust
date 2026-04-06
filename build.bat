@@ -65,6 +65,13 @@ set "PROFILE_FILE=%CONAN_DIR%\conan\profiles\windows-x64-static"
 set "CONAN_OUTPUT=%CONAN_DIR%\conan_output"
 if not exist "%CONAN_OUTPUT%" mkdir "%CONAN_OUTPUT%"
 
+set "VENDOR_SOURCES=%CONAN_DIR%\vendor\conan-sources"
+if exist "%VENDOR_SOURCES%" (
+    for /f "tokens=*" %%h in ('conan config home') do set "CONAN_HOME=%%h"
+    findstr /c:"core.sources:download_cache" "!CONAN_HOME!\global.conf" >nul 2>&1
+    if !errorlevel! neq 0 echo core.sources:download_cache=%VENDOR_SOURCES%>> "!CONAN_HOME!\global.conf"
+)
+
 if exist "%PROFILE_FILE%" (
     conan install "%CONAN_DIR%" --output-folder "%CONAN_OUTPUT%" --build=missing --profile:host "%PROFILE_FILE%"
 ) else (

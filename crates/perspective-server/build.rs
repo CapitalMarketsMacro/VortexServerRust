@@ -191,6 +191,29 @@ fn conan_install(manifest_dir: &Path) -> PathBuf {
         .arg(&conan_output_dir)
         .arg("--build=missing");
 
+    // Use vendored source archives (e.g. Arrow) to avoid downloading
+    // from URLs that may be blocked by corporate firewalls.
+    let vendor_sources = manifest_dir.join("vendor").join("conan-sources");
+    if vendor_sources.is_dir() {
+        // Get Conan home directory and write download cache config to global.conf
+        if let Ok(output) = Command::new("conan").arg("config").arg("home").output() {
+            let conan_home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let global_conf = PathBuf::from(&conan_home).join("global.conf");
+            let existing = fs::read_to_string(&global_conf).unwrap_or_default();
+            if !existing.contains("core.sources:download_cache") {
+                // Use forward slashes to avoid UNC path issues on Windows
+                let vendor_path = vendor_sources.display().to_string().replace('\\', "/");
+                let conf_line = format!("core.sources:download_cache={vendor_path}");
+                let new_content = if existing.is_empty() {
+                    conf_line
+                } else {
+                    format!("{}\n{}", existing.trim(), conf_line)
+                };
+                let _ = fs::write(&global_conf, new_content);
+            }
+        }
+    }
+
     if profile_path.exists() {
         cmd.arg("--profile:host").arg(&profile_path);
     } else {
