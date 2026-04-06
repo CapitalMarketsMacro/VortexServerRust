@@ -109,19 +109,30 @@ echo
 echo "--- Locating protoc ---"
 echo
 
-# Find protoc from Conan's VirtualBuildEnv or system PATH
+# Find protoc from Conan's package cache, VirtualBuildEnv, or system PATH
 PROTOC_BIN=""
-CONANBUILD="$CONAN_DIR/conan_output/build/generators/conanbuild.sh"
-if [ -f "$CONANBUILD" ]; then
-    # Source the Conan build env to get protoc on PATH
-    source "$CONANBUILD"
+
+# Try sourcing Conan build env scripts
+for f in "$CONAN_DIR/conan_output/build/generators/conanbuild.sh" \
+         "$CONAN_DIR/conan_output/conanbuild.sh"; do
+    [ -f "$f" ] && source "$f" 2>/dev/null
+done
+
+# Search Conan package cache for protoc binary
+if [ -z "$PROTOC_BIN" ]; then
+    PROTOC_BIN=$(find ~/.conan2/p/ -name "protoc" -type f -executable 2>/dev/null | head -1)
 fi
-if command -v protoc &>/dev/null; then
+
+# Fall back to system PATH
+if [ -z "$PROTOC_BIN" ] && command -v protoc &>/dev/null; then
     PROTOC_BIN="$(which protoc)"
-    echo "  [OK] protoc: $PROTOC_BIN ($(protoc --version))"
+fi
+
+if [ -n "$PROTOC_BIN" ]; then
+    echo "  [OK] protoc: $PROTOC_BIN"
     export PROTOC="$PROTOC_BIN"
 else
-    echo "  [WARN] protoc not found — will use bundled-protoc feature"
+    echo "  [WARN] protoc not found — will try bundled-protoc"
 fi
 
 echo
