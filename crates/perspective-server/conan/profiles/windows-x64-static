@@ -2,6 +2,7 @@ include(default)
 
 [settings]
 compiler.cppstd=17
+compiler.runtime=dynamic
 build_type=Release
 
 [options]
