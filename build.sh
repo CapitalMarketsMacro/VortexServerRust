@@ -123,7 +123,92 @@ echo
 cargo build --release -p perspective --features axum-ws
 
 echo
+echo "--- Deploying to dist/ ---"
+echo
+
+DIST="$ROOT/dist"
+rm -rf "$DIST"
+mkdir -p "$DIST/cpp_cache/build" "$DIST/example/src"
+
+# Cache pre-built C++ artifacts
+for d in "$ROOT/target/release/build/perspective-server-"*/out/build; do
+    [ -d "$d" ] || continue
+
+    # psp + protos static libs
+    find "$d" -maxdepth 2 \( -name "libpsp.a" -o -name "psp.lib" \) -exec cp {} "$DIST/cpp_cache/build/" \;
+    if [ -d "$d/protos-build" ]; then
+        mkdir -p "$DIST/cpp_cache/build/protos-build"
+        find "$d/protos-build" -maxdepth 2 \( -name "libprotos.a" -o -name "protos.lib" \) -exec cp {} "$DIST/cpp_cache/build/protos-build/" \;
+    fi
+
+    # Release subdirectory (MSVC)
+    if [ -d "$d/Release" ]; then
+        mkdir -p "$DIST/cpp_cache/build/Release"
+        cp "$d/Release"/*.lib "$DIST/cpp_cache/build/Release/" 2>/dev/null || true
+    fi
+    if [ -d "$d/protos-build/Release" ]; then
+        mkdir -p "$DIST/cpp_cache/build/protos-build/Release"
+        cp "$d/protos-build/Release"/*.lib "$DIST/cpp_cache/build/protos-build/Release/" 2>/dev/null || true
+    fi
+
+    break
+done
+
+# Copy crate sources for path deps
+cp -r "$ROOT/crates" "$DIST/crates"
+cp "$ROOT/Cargo.toml" "$DIST/Cargo.toml"
+
+# Create env script
+cat > "$DIST/env.sh" << 'ENVEOF'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PSP_CPP_BUILD_DIR="$SCRIPT_DIR/cpp_cache"
+echo "[OK] PSP_CPP_BUILD_DIR=$PSP_CPP_BUILD_DIR"
+ENVEOF
+chmod +x "$DIST/env.sh"
+
+cat > "$DIST/env.bat" << 'ENVEOF'
+@echo off
+set "PSP_CPP_BUILD_DIR=%~dp0cpp_cache"
+echo [OK] PSP_CPP_BUILD_DIR=%PSP_CPP_BUILD_DIR%
+ENVEOF
+
+# Create example
+cat > "$DIST/example/Cargo.toml" << 'EXEOF'
+[package]
+name = "my-perspective-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+perspective = { path = "../crates/perspective", features = ["axum-ws"] }
+axum = { version = ">=0.8,<0.9", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace]
+members = []
+
+[patch.crates-io]
+perspective = { path = "../crates/perspective" }
+perspective-client = { path = "../crates/perspective-client" }
+perspective-server = { path = "../crates/perspective-server" }
+EXEOF
+
+cp "$ROOT/examples/axum-server/src/main.rs" "$DIST/example/src/main.rs"
+
+echo
 echo "========================================"
 echo "  Build succeeded!"
 echo "========================================"
+echo
+echo "  dist/                - Deployable package"
+echo "  dist/cpp_cache/      - Pre-built C++ artifacts"
+echo "  dist/crates/         - Rust source crates"
+echo "  dist/example/        - Example project"
+echo
+echo "  To use in your project:"
+echo "    1. source dist/env.sh  (or run dist\\env.bat)"
+echo "    2. cd dist/example && cargo build --release"
 echo

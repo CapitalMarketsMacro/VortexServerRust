@@ -112,10 +112,90 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+:: --- Deploy to dist ---
+echo.
+echo --- Deploying to dist ---
+echo.
+
+set "DIST=%ROOT%dist"
+if exist "%DIST%" rmdir /s /q "%DIST%"
+mkdir "%DIST%\cpp_cache\build" "%DIST%\example\src"
+
+:: Cache pre-built C++ artifacts
+for /d %%d in ("%ROOT%target\release\build\perspective-server-*") do (
+    if exist "%%d\out\build" (
+        for /r "%%d\out\build" %%f in (psp.lib) do (
+            copy "%%f" "%DIST%\cpp_cache\build\" >nul 2>nul
+        )
+        if exist "%%d\out\build\protos-build" (
+            mkdir "%DIST%\cpp_cache\build\protos-build" 2>nul
+            for /r "%%d\out\build\protos-build" %%f in (protos.lib) do (
+                copy "%%f" "%DIST%\cpp_cache\build\protos-build\" >nul 2>nul
+            )
+        )
+        if exist "%%d\out\build\Release" (
+            mkdir "%DIST%\cpp_cache\build\Release" 2>nul
+            copy "%%d\out\build\Release\*.lib" "%DIST%\cpp_cache\build\Release\" >nul 2>nul
+        )
+        if exist "%%d\out\build\protos-build\Release" (
+            mkdir "%DIST%\cpp_cache\build\protos-build\Release" 2>nul
+            copy "%%d\out\build\protos-build\Release\*.lib" "%DIST%\cpp_cache\build\protos-build\Release\" >nul 2>nul
+        )
+    )
+)
+
+:: Copy crate sources
+xcopy /s /e /q /i "%ROOT%crates" "%DIST%\crates" >nul
+
+:: Copy workspace Cargo.toml
+copy "%ROOT%Cargo.toml" "%DIST%\Cargo.toml" >nul
+
+:: Create env.bat
+> "%DIST%\env.bat" (
+    echo @echo off
+    echo set "PSP_CPP_BUILD_DIR=%%~dp0cpp_cache"
+    echo echo [OK] PSP_CPP_BUILD_DIR=%%PSP_CPP_BUILD_DIR%%
+)
+
+:: Create example Cargo.toml
+> "%DIST%\example\Cargo.toml" (
+    echo [package]
+    echo name = "my-perspective-app"
+    echo version = "0.1.0"
+    echo edition = "2024"
+    echo.
+    echo [dependencies]
+    echo perspective = { path = "../crates/perspective", features = ["axum-ws"] }
+    echo axum = { version = "^0.8", features = ["ws"] }
+    echo tokio = { version = "1", features = ["full"] }
+    echo tracing = "0.1"
+    echo tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+    echo.
+    echo [workspace]
+    echo members = []
+    echo.
+    echo [patch.crates-io]
+    echo perspective = { path = "../crates/perspective" }
+    echo perspective-client = { path = "../crates/perspective-client" }
+    echo perspective-server = { path = "../crates/perspective-server" }
+)
+
+:: Copy example main.rs
+copy "%ROOT%examples\axum-server\src\main.rs" "%DIST%\example\src\main.rs" >nul
+
 echo.
 echo ========================================
 echo   Build succeeded!
 echo ========================================
+echo.
+echo   dist\              - Deployable package
+echo   dist\cpp_cache\    - Pre-built C++ artifacts
+echo   dist\crates\       - Rust source crates
+echo   dist\example\      - Example project
+echo.
+echo   To use in your project:
+echo     1. Run dist\env.bat
+echo     2. cd dist\example ^&^& cargo build --release
 echo.
 
 endlocal
