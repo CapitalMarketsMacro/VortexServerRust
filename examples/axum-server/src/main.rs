@@ -10,15 +10,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let server = Server::new(None);
 
-    // Load CSV data
+    // Load data via JSON columns (CSV disabled in this build)
     let client = server.new_local_client();
-    let csv = "x,y,z\n1,100,a\n2,200,b\n3,300,c\n4,400,d".to_string();
+    let json = r#"{"x":[1,2,3,4],"y":[100,200,300,400],"z":["a","b","c","d"]}"#.to_string();
     let mut opts = TableInitOptions::default();
     opts.set_name("my_table");
-    client.table(UpdateData::Csv(csv).into(), opts).await?;
+    client
+        .table(UpdateData::JsonColumns(json).into(), opts)
+        .await?;
     client.close().await;
 
-    // Start WebSocket server
+    // Start WebSocket server — connect <perspective-viewer> to ws://localhost:3000/ws
     let app = Router::new()
         .route("/ws", perspective::axum::websocket_handler())
         .with_state(server);
