@@ -1,6 +1,8 @@
 target/
 dist/
+Vortex/dist/
 conan_output/
+Vortex/conan_output/
 .cache
 .clangd
 .DS_Store
