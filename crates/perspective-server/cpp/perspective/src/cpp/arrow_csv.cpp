@@ -16,7 +16,9 @@
 #include <arrow/util/value_parsing.h>
 #include <arrow/io/memory.h>
 #include <arrow/buffer.h>
+#ifdef PSP_ENABLE_CSV
 #include <arrow/csv/reader.h>
+#endif
 
 template <class TimePoint>
 static inline arrow::TimestampType::c_type
@@ -605,6 +607,7 @@ csvToTable(
     bool is_update,
     std::unordered_map<std::string, std::shared_ptr<arrow::DataType>>& schema
 ) {
+#ifdef PSP_ENABLE_CSV
     const arrow::io::IOContext& io_context = arrow::io::default_io_context();
     auto input = std::make_shared<arrow::io::BufferReader>(
         arrow::Buffer::FromString(std::string(csv)));
@@ -636,6 +639,10 @@ csvToTable(
         PSP_COMPLAIN_AND_ABORT(maybe_table.status().ToString());
     }
     return *maybe_table;
+#else
+    PSP_COMPLAIN_AND_ABORT("CSV support is disabled (Arrow built without with_csv)");
+    return nullptr;
+#endif
 }
 
 } // namespace perspective::apachearrow

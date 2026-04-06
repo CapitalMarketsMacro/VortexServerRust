@@ -9,8 +9,8 @@ class PerspectiveServerConan(ConanFile):
     generators = "CMakeToolchain", "CMakeDeps", "VirtualBuildEnv"
 
     def requirements(self):
-        # Latest versions with pre-built MSVC 194 binaries on conancenter
-        # (shared=False, runtime=dynamic, cppstd=17).
+        # Latest versions with pre-built MSVC 194 binaries on conancenter.
+        # ALL deps download as pre-built — zero source compilation.
         self.requires("arrow/22.0.0")
         self.requires("protobuf/6.33.5")
         self.requires("re2/20251105")
@@ -23,25 +23,10 @@ class PerspectiveServerConan(ConanFile):
         self.requires("exprtk/0.0.2")
 
     def configure(self):
-        # Boost: header-only avoids compiling Boost libraries.
-        self.options["boost"].header_only = True
-
-        # Arrow: enable CSV (required - used for CSV parsing/export).
-        # Only Arrow builds from source; all other deps use pre-built.
-        self.options["arrow"].with_csv = True
-        self.options["arrow"].with_json = False
-        self.options["arrow"].parquet = False
-        self.options["arrow"].with_flight_rpc = False
-        self.options["arrow"].gandiva = False
-        self.options["arrow"].with_re2 = False
-        self.options["arrow"].with_utf8proc = False
-        self.options["arrow"].with_brotli = False
-        self.options["arrow"].with_bz2 = False
-        self.options["arrow"].with_lz4 = False
-        self.options["arrow"].with_snappy = False
-        self.options["arrow"].with_zlib = False
-        self.options["arrow"].with_zstd = False
-        self.options["arrow"].with_thrift = False
+        # Arrow: use all defaults to match conancenter pre-built binary.
+        # CSV is disabled (with_csv=False by default). CSV functions
+        # are guarded with #ifdef PSP_ENABLE_CSV in the C++ source.
+        pass
 
     def layout(self):
         cmake_layout(self)

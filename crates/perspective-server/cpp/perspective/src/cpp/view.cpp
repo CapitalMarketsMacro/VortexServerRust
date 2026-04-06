@@ -17,7 +17,9 @@
 #include <utility>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#ifdef PSP_ENABLE_CSV
 #include <arrow/csv/writer.h>
+#endif
 #include <perspective/pyutils.h>
 
 namespace perspective {
@@ -1405,6 +1407,7 @@ View<CTX_T>::data_slice_to_csv(std::shared_ptr<t_data_slice<CTX_T>> data_slice
 
     std::shared_ptr<arrow::ResizableBuffer> buffer;
     buffer = *allocated;
+#ifdef PSP_ENABLE_CSV
     arrow::io::BufferOutputStream sink(buffer);
     auto write_options = arrow::csv::WriteOptions::Defaults();
     auto maybe_writer =
@@ -1414,6 +1417,10 @@ View<CTX_T>::data_slice_to_csv(std::shared_ptr<t_data_slice<CTX_T>> data_slice
     PSP_CHECK_ARROW_STATUS(writer->Close());
     PSP_CHECK_ARROW_STATUS(sink.Close());
     return std::make_shared<std::string>(buffer->ToString());
+#else
+    PSP_COMPLAIN_AND_ABORT("CSV export is disabled (Arrow built without with_csv)");
+    return nullptr;
+#endif
 }
 
 // Delta calculation
