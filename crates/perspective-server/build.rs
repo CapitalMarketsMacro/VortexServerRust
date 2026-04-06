@@ -87,15 +87,16 @@ fn find_protoc_optional() -> Option<PathBuf> {
 
 /// Search the Conan output directory for the protoc binary.
 fn find_protoc_from_conan() -> Option<PathBuf> {
-    let generators_dir = Path::new("conan_output").join("build").join("generators");
-    let conan_output = if generators_dir.is_dir() {
-        generators_dir
-    } else {
-        let fallback = Path::new("conan_output").to_path_buf();
-        if !fallback.is_dir() {
-            return None;
-        }
-        fallback
+    let base = Path::new("conan_output");
+    let candidates = [
+        base.join("build").join("generators"),
+        base.join("build").join("Release").join("generators"),
+        base.join("build").join("release").join("generators"),
+        base.to_path_buf(),
+    ];
+    let conan_output = match candidates.iter().find(|d| d.is_dir()) {
+        Some(d) => d.clone(),
+        None => return None,
     };
 
     let protoc_name = if cfg!(windows) { "protoc.exe" } else { "protoc" };
@@ -320,19 +321,25 @@ fn cmake_build() -> Result<Option<PathBuf>, std::io::Error> {
     dst.env("VCPKG_ROOT", "");
     dst.define("VCPKG_MANIFEST_MODE", "OFF");
 
-    // Set up Conan toolchain
-    let generators_dir = conan_output.join("build").join("generators");
-    let toolchain_file = if generators_dir.join("conan_toolchain.cmake").exists() {
-        generators_dir.join("conan_toolchain.cmake")
-    } else {
-        conan_output.join("conan_toolchain.cmake")
-    };
+    // Set up Conan toolchain — search multiple possible locations
+    // (Conan puts generators in different subdirs depending on platform/version)
+    let search_dirs = [
+        conan_output.join("build").join("generators"),
+        conan_output.join("build").join("Release").join("generators"),
+        conan_output.join("build").join("release").join("generators"),
+        conan_output.clone(),
+    ];
 
-    assert!(
-        toolchain_file.exists(),
-        "conan_toolchain.cmake not found in {}",
-        conan_output.display()
-    );
+    let toolchain_file = search_dirs
+        .iter()
+        .map(|d| d.join("conan_toolchain.cmake"))
+        .find(|f| f.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "conan_toolchain.cmake not found in any of: {:?}",
+                search_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>()
+            )
+        });
 
     println!(
         "cargo:warning=Using Conan toolchain at {}",
@@ -404,12 +411,14 @@ fn cmake_link_deps(cmake_build_dir: &Path) -> Result<(), std::io::Error> {
 
     // Link Conan-installed libraries
     let manifest_dir = std::fs::canonicalize(".")?;
-    let generators_dir = manifest_dir.join("conan_output").join("build").join("generators");
-    let conan_cmake_dir = if generators_dir.is_dir() {
-        generators_dir
-    } else {
-        manifest_dir.join("conan_output")
-    };
+    let base = manifest_dir.join("conan_output");
+    let candidates = [
+        base.join("build").join("generators"),
+        base.join("build").join("Release").join("generators"),
+        base.join("build").join("release").join("generators"),
+        base.clone(),
+    ];
+    let conan_cmake_dir = candidates.iter().find(|d| d.is_dir()).cloned().unwrap_or(base);
     if conan_cmake_dir.exists() {
         link_conan_libraries(&conan_cmake_dir, &mut linked)?;
     }
