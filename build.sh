@@ -106,6 +106,25 @@ fi
 conan "${CONAN_ARGS[@]}"
 
 echo
+echo "--- Locating protoc ---"
+echo
+
+# Find protoc from Conan's VirtualBuildEnv or system PATH
+PROTOC_BIN=""
+CONANBUILD="$CONAN_DIR/conan_output/build/generators/conanbuild.sh"
+if [ -f "$CONANBUILD" ]; then
+    # Source the Conan build env to get protoc on PATH
+    source "$CONANBUILD"
+fi
+if command -v protoc &>/dev/null; then
+    PROTOC_BIN="$(which protoc)"
+    echo "  [OK] protoc: $PROTOC_BIN ($(protoc --version))"
+    export PROTOC="$PROTOC_BIN"
+else
+    echo "  [WARN] protoc not found — will use bundled-protoc feature"
+fi
+
+echo
 echo "--- Generating protobuf bindings ---"
 echo
 
