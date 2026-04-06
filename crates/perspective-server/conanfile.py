@@ -8,6 +8,10 @@ class PerspectiveServerConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     generators = "CMakeToolchain", "CMakeDeps", "VirtualBuildEnv"
 
+    def build_requirements(self):
+        # protoc compiler needed at build time for .proto code generation
+        self.tool_requires("protobuf/<host_version>")
+
     def requirements(self):
         # Latest versions with pre-built MSVC 194 binaries on conancenter.
         # ALL deps download as pre-built — zero source compilation.
