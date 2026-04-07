@@ -97,7 +97,7 @@ impl Server {
     where
         F: for<'a> Fn(&'a [u8]) -> BoxFuture<'a, Result<(), ServerError>> + 'static + Sync + Send,
     {
-        let id = self.server.new_session();
+        let id = self.server.new_session().await;
         let server = self.clone();
         self.callbacks
             .write()
@@ -155,7 +155,7 @@ impl Server {
     /// `poll()` _must_ be called after [`Table::update`] or [`Table::remove`]
     /// and `on_poll_request` is notified, or the changes will not be applied.
     pub async fn poll(&self) -> Result<(), ServerError> {
-        let responses = self.server.poll();
+        let responses = self.server.poll().await;
         let mut results = Vec::with_capacity(responses.size());
         for response in responses.iter_responses() {
             let cb = self

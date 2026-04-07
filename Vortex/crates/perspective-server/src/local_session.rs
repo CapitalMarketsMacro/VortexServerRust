@@ -38,7 +38,7 @@ impl Drop for LocalSession {
 impl Session<ServerError> for LocalSession {
     async fn handle_request(&self, request: &[u8]) -> Result<(), ServerError> {
         let request = ffi::Request::from(request);
-        let responses = self.server.server.handle_request(self.id, &request);
+        let responses = self.server.server.handle_request(self.id, &request).await;
         let mut results = Vec::with_capacity(responses.size());
         for response in responses.iter_responses() {
             let cb = self
@@ -65,7 +65,7 @@ impl Session<ServerError> for LocalSession {
 
     async fn close(mut self) {
         self.closed = true;
-        self.server.server.close_session(self.id);
+        self.server.server.close_session(self.id).await;
         self.server
             .callbacks
             .write()
