@@ -1,177 +1,128 @@
-use perspective::server::Server;
-use perspective::client::{TableInitOptions, UpdateData, UpdateOptions};
-use axum::Router;
-use std::fmt::Write;
+mod config;
+mod logging;
+mod nats;
+mod tables;
+
 use std::net::SocketAddr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::{MissedTickBehavior, interval};
+use std::path::PathBuf;
 
-struct OtrTreasury {
-    instrument: &'static str,
-    tenor: &'static str,
-    coupon: f64,
-    base_mid: f64,
-    spread: f64,
-    amplitude: f64,
-    phase: f64,
+use axum::Router;
+use clap::Parser;
+use perspective::server::Server;
+use tokio_util::sync::CancellationToken;
+
+use crate::config::AppConfig;
+use crate::tables::TableRegistry;
+
+#[derive(Parser, Debug)]
+#[command(name = "vortex-server", version, about = "High-performance Perspective server")]
+struct Cli {
+    /// Path to the JSON configuration file.
+    #[arg(short, long, env = "VORTEX_CONFIG", default_value = "config.json")]
+    config: PathBuf,
 }
 
-const OTR_TREASURIES: [OtrTreasury; 7] = [
-    OtrTreasury {
-        instrument: "UST-2Y",
-        tenor: "2Y",
-        coupon: 4.625,
-        base_mid: 99.8125,
-        spread: 0.0150,
-        amplitude: 0.0450,
-        phase: 0.20,
-    },
-    OtrTreasury {
-        instrument: "UST-3Y",
-        tenor: "3Y",
-        coupon: 4.500,
-        base_mid: 99.5313,
-        spread: 0.0180,
-        amplitude: 0.0500,
-        phase: 0.70,
-    },
-    OtrTreasury {
-        instrument: "UST-5Y",
-        tenor: "5Y",
-        coupon: 4.250,
-        base_mid: 99.0469,
-        spread: 0.0225,
-        amplitude: 0.0600,
-        phase: 1.10,
-    },
-    OtrTreasury {
-        instrument: "UST-7Y",
-        tenor: "7Y",
-        coupon: 4.125,
-        base_mid: 98.7813,
-        spread: 0.0275,
-        amplitude: 0.0700,
-        phase: 1.60,
-    },
-    OtrTreasury {
-        instrument: "UST-10Y",
-        tenor: "10Y",
-        coupon: 4.000,
-        base_mid: 98.4375,
-        spread: 0.0310,
-        amplitude: 0.0800,
-        phase: 2.10,
-    },
-    OtrTreasury {
-        instrument: "UST-20Y",
-        tenor: "20Y",
-        coupon: 4.375,
-        base_mid: 101.1250,
-        spread: 0.0380,
-        amplitude: 0.0950,
-        phase: 2.70,
-    },
-    OtrTreasury {
-        instrument: "UST-30Y",
-        tenor: "30Y",
-        coupon: 4.250,
-        base_mid: 100.6875,
-        spread: 0.0450,
-        amplitude: 0.1100,
-        phase: 3.20,
-    },
-];
+// Multi-threaded runtime: safe because `perspective_server::ffi::Server`
+// serializes all C++ FFI calls through an internal `async_lock::Mutex`.
+// Without that mutex, concurrent FFI calls from different tokio workers
+// (NATS consumer vs Axum WS handler) corrupt the engine state because the
+// bundled C++ engine is built without `PSP_PARALLEL_FOR` and its internal
+// `ServerResources` locks are no-ops.
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
 
-fn round_price(value: f64) -> f64 {
-    (value * 100_000.0).round() / 100_000.0
-}
+    let app_config = AppConfig::load(&cli.config)?;
 
-fn now_epoch_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
+    // Keep the guard alive until shutdown so file logs are flushed on exit.
+    let _log_guard = logging::init(&app_config.logging)?;
 
-fn market_rows_json(tick: u64) -> String {
-    let timestamp = now_epoch_ms();
-    let mut json = String::from("[");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        config = %cli.config.display(),
+        "starting VortexServer"
+    );
 
-    for (idx, security) in OTR_TREASURIES.iter().enumerate() {
-        if idx > 0 {
-            json.push(',');
-        }
+    // Build Perspective server. Static tables are created eagerly; tables
+    // bound to a NATS source are created lazily on the first message so
+    // their schema can be inferred from real data.
+    let server = Server::new(None);
+    let registry = TableRegistry::new(server.new_local_client());
+    registry.create_static_tables(&app_config.tables).await?;
 
-        let drift = ((tick as f64 / 6.0) + security.phase).sin() * security.amplitude
-            + ((tick as f64 / 13.0) + security.phase * 0.5).cos() * security.amplitude * 0.35;
-        let mid = round_price(security.base_mid + drift);
-        let bid = round_price(mid - security.spread / 2.0);
-        let ask = round_price(mid + security.spread / 2.0);
+    tracing::info!(
+        static_tables = ?registry.names().await,
+        "static tables ready"
+    );
 
-        let _ = write!(
-            json,
-            "{{\"instrument\":\"{}\",\"tenor\":\"{}\",\"coupon\":{:.3},\"bid\":{:.5},\"mid\":{:.5},\"ask\":{:.5},\"last_update_epoch_ms\":{},\"tick\":{}}}",
-            security.instrument,
-            security.tenor,
-            security.coupon,
-            bid,
-            mid,
-            ask,
-            timestamp,
-            tick
-        );
+    let shutdown = CancellationToken::new();
+
+    // Start NATS JetStream consumers (no-op if NATS is not configured).
+    if let Some(nats_cfg) = &app_config.nats {
+        nats::spawn_consumers(
+            nats_cfg,
+            &app_config.tables,
+            registry.clone(),
+            shutdown.clone(),
+        )
+        .await?;
+    } else {
+        tracing::info!("no [nats] section in config — running without NATS");
     }
 
-    json.push(']');
-    json
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
-    let server = Server::new(None);
-
-    let client = server.new_local_client();
-    let mut opts = TableInitOptions::default();
-    opts.set_name("my_table");
-    opts.index = Some("instrument".to_string());
-
-    let table = client
-        .table(UpdateData::JsonRows(market_rows_json(0)).into(), opts)
-        .await?;
-
-    tokio::spawn(async move {
-        let mut tick: u64 = 1;
-        let mut updates = interval(Duration::from_secs(1));
-        updates.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            updates.tick().await;
-
-            if let Err(error) = table
-                .update(
-                    UpdateData::JsonRows(market_rows_json(tick)),
-                    UpdateOptions::default(),
-                )
-                .await
-            {
-                eprintln!("failed to publish OTR Treasury update: {error}");
-                break;
-            }
-
-            tick = tick.saturating_add(1);
-        }
-    });
-
+    // Build HTTP / WebSocket router.
     let app = Router::new()
-        .route("/ws", perspective::axum::websocket_handler())
+        .route(&app_config.server.ws_path, perspective::axum::websocket_handler())
         .with_state(server);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:4000").await?;
-    tracing::info!("VortexServer listening on http://localhost:4000");
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    let listener = tokio::net::TcpListener::bind(&app_config.server.bind).await?;
+    tracing::info!(
+        bind = %app_config.server.bind,
+        ws_path = %app_config.server.ws_path,
+        "listening"
+    );
+
+    let serve = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown.clone()));
+
+    if let Err(error) = serve.await {
+        tracing::error!(%error, "http server exited with error");
+    }
+
+    shutdown.cancel();
+    tracing::info!("VortexServer stopped");
     Ok(())
+}
+
+async fn shutdown_signal(token: CancellationToken) {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to install Ctrl+C handler");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to install SIGTERM handler");
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("received Ctrl+C"),
+        _ = terminate => tracing::info!("received SIGTERM"),
+    }
+
+    token.cancel();
 }

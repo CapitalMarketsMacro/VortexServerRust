@@ -19,11 +19,32 @@ name = "vortex-server"
 path = "src/main.rs"
 
 [dependencies]
+# Perspective engine
 perspective = { path = "Vortex/crates/perspective", features = ["axum-ws"] }
+
+# Web server
 axum = { version = ">=0.8,<0.9", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# CLI / config
+clap = { version = "4", features = ["derive", "env"] }
+figment = { version = "0.10", features = ["json", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging / observability
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt", "registry"] }
+tracing-appender = "0.2"
+
+# Errors
+anyhow = "1"
+thiserror = "1"
+
+# NATS JetStream
+async-nats = "0.38"
+futures = "0.3"
 
 [profile.dev]
 panic = "abort"
