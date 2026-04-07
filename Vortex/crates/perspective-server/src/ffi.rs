@@ -125,37 +125,62 @@ impl Drop for Request {
     }
 }
 
-pub struct Server(*const u8);
+/// Wraps the C++ `ProtoServer` pointer. ALL FFI calls are serialized through
+/// the embedded `async_lock::Mutex` because the bundled C++ engine is built
+/// without `PSP_PARALLEL_FOR`, which makes its internal `ServerResources`
+/// reader/writer locks compile-out to no-ops (see `pyutils.h:33-39` and
+/// `server.h:633`). Without this Mutex, concurrent FFI calls from different
+/// tokio worker threads (e.g. a NATS update racing an Axum WS handler) corrupt
+/// engine state and trigger `Abort(): touching uninited object` followed by
+/// STATUS_ACCESS_VIOLATION.
+///
+/// Using an async mutex (rather than `std::sync::Mutex`) lets other tasks on
+/// the same tokio worker make progress while one task is waiting for the
+/// engine lock.
+pub struct Server {
+    ptr: *const u8,
+    lock: async_lock::Mutex<()>,
+}
 
 impl Server {
     pub fn new(realtime_mode: bool) -> Self {
-        Server(unsafe { psp_new_server(realtime_mode) })
+        Server {
+            ptr: unsafe { psp_new_server(realtime_mode) },
+            lock: async_lock::Mutex::new(()),
+        }
     }
 
-    pub fn new_session(&self) -> u32 {
-        unsafe { psp_new_session(self.0) }
+    pub async fn new_session(&self) -> u32 {
+        let _guard = self.lock.lock().await;
+        unsafe { psp_new_session(self.ptr) }
     }
 
-    pub fn handle_request(&self, client_id: u32, request: &Request) -> ResponseBatch {
-        unsafe { psp_handle_request(self.0, client_id, request.0, request.1) }
+    pub async fn handle_request(&self, client_id: u32, request: &Request) -> ResponseBatch {
+        let _guard = self.lock.lock().await;
+        unsafe { psp_handle_request(self.ptr, client_id, request.0, request.1) }
     }
 
-    pub fn poll(&self) -> ResponseBatch {
-        unsafe { psp_poll(self.0) }
+    pub async fn poll(&self) -> ResponseBatch {
+        let _guard = self.lock.lock().await;
+        unsafe { psp_poll(self.ptr) }
     }
 
-    pub fn close_session(&self, session_id: u32) {
-        unsafe { psp_close_session(self.0, session_id) }
+    pub async fn close_session(&self, session_id: u32) {
+        let _guard = self.lock.lock().await;
+        unsafe { psp_close_session(self.ptr, session_id) }
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        unsafe { psp_delete_server(self.0) }
+        // Drop runs when the last Arc reference is gone — no concurrent access
+        // possible at this point, so we can skip the lock.
+        unsafe { psp_delete_server(self.ptr) }
     }
 }
 
-// These types' thread safety is enforced on the C++ side, free-hand.
+// Send+Sync are now sound: every FFI call holds the embedded Mutex, so
+// concurrent access from multiple threads is properly serialized.
 unsafe impl Send for Server {}
 unsafe impl Sync for Server {}
 
