@@ -1,7 +1,8 @@
 mod config;
+mod ingress;
 mod logging;
-mod nats;
 mod tables;
+mod transform;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -57,18 +58,10 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown = CancellationToken::new();
 
-    // Start NATS JetStream consumers (no-op if NATS is not configured).
-    if let Some(nats_cfg) = &app_config.nats {
-        nats::spawn_consumers(
-            nats_cfg,
-            &app_config.tables,
-            registry.clone(),
-            shutdown.clone(),
-        )
-        .await?;
-    } else {
-        tracing::info!("no [nats] section in config — running without NATS");
-    }
+    // Start ingress for every table that has a source binding. The dispatcher
+    // walks the configured transports (NATS / Solace / WebSocket) and spawns
+    // a per-table consumer task for each.
+    ingress::spawn_consumers(&app_config, registry.clone(), shutdown.clone()).await?;
 
     // Build HTTP / WebSocket router.
     let app = Router::new()

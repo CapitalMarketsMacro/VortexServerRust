@@ -9,7 +9,7 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub logging: LoggingConfig,
     #[serde(default)]
-    pub nats: Option<NatsConfig>,
+    pub transports: TransportsConfig,
     #[serde(default)]
     pub tables: Vec<TableConfig>,
 }
@@ -56,6 +56,18 @@ pub enum LogFormat {
     Json,
 }
 
+/// Transport-level connection settings shared across all tables that use a
+/// given transport. Each transport is optional — only the ones referenced by
+/// at least one table need to be configured. WebSocket has no transport-level
+/// settings; each WebSocket-sourced table carries its own endpoint URL.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransportsConfig {
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
+    #[serde(default)]
+    pub solace: Option<SolaceConfig>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NatsConfig {
     /// NATS server URL(s), e.g. "nats://localhost:4222". Empty disables NATS.
@@ -69,6 +81,31 @@ pub struct NatsConfig {
 }
 
 fn default_nats_name() -> String {
+    "vortex-server".to_string()
+}
+
+/// Solace PubSub+ broker connection settings. Currently scaffolded; the actual
+/// SMF client binding is not yet wired up — startup fails fast if any table
+/// uses the `solace` transport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SolaceConfig {
+    /// Solace broker URL, e.g. "tcps://broker.example.com:55443" or
+    /// "tcp://localhost:55555".
+    pub host: String,
+    /// Message VPN name.
+    #[serde(default = "default_solace_vpn")]
+    pub vpn: String,
+    pub username: String,
+    pub password: String,
+    #[serde(default = "default_solace_client_name")]
+    pub client_name: String,
+}
+
+fn default_solace_vpn() -> String {
+    "default".to_string()
+}
+
+fn default_solace_client_name() -> String {
     "vortex-server".to_string()
 }
 
@@ -89,7 +126,9 @@ pub struct TableConfig {
     /// scalar columns.
     #[serde(default)]
     pub stringify_columns: Vec<String>,
-    /// Optional NATS binding — if present, this table is populated from a NATS subject.
+    /// Optional ingress source. Tables without a source are static (created
+    /// empty at startup) and only mutate via direct `Client::table` /
+    /// `Table::update` calls from inside vortex-server.
     #[serde(default)]
     pub source: Option<TableSource>,
 }
@@ -105,20 +144,20 @@ impl TableConfig {
     }
 }
 
-/// NATS source binding. Tagged on `transport` so the JSON config picks
-/// between core pub/sub and JetStream pull consumers.
+/// Per-table ingress binding. Tagged on `transport`. Each variant carries
+/// only the fields meaningful for that transport.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
 pub enum TableSource {
     /// Plain NATS pub/sub. No persistence, no acks, no replay.
-    Core {
+    NatsCore {
         /// Subject to subscribe to (supports wildcards).
         subject: String,
         #[serde(default = "default_payload_format")]
         format: PayloadFormat,
     },
     /// JetStream durable pull consumer. Persistent, acked, replayable.
-    Jetstream {
+    NatsJetstream {
         /// JetStream stream name.
         stream: String,
         /// Subject filter (supports wildcards).
@@ -128,12 +167,43 @@ pub enum TableSource {
         #[serde(default = "default_payload_format")]
         format: PayloadFormat,
     },
+    /// Solace direct topic subscription.
+    Solace {
+        /// Solace topic (supports `>` and `*` wildcards).
+        topic: String,
+        #[serde(default = "default_payload_format")]
+        format: PayloadFormat,
+    },
+    /// Plain WebSocket client — connect to a remote endpoint and consume
+    /// messages as table updates. Reconnects with exponential backoff on
+    /// disconnect.
+    Websocket {
+        /// WebSocket endpoint URL (`ws://` or `wss://`).
+        endpoint: String,
+        /// Optional sub-protocols to request via `Sec-WebSocket-Protocol`.
+        #[serde(default)]
+        subprotocols: Vec<String>,
+        #[serde(default = "default_payload_format")]
+        format: PayloadFormat,
+    },
 }
 
 impl TableSource {
     pub fn format(&self) -> PayloadFormat {
         match self {
-            Self::Core { format, .. } | Self::Jetstream { format, .. } => *format,
+            Self::NatsCore { format, .. }
+            | Self::NatsJetstream { format, .. }
+            | Self::Solace { format, .. }
+            | Self::Websocket { format, .. } => *format,
+        }
+    }
+
+    pub fn transport_label(&self) -> &'static str {
+        match self {
+            Self::NatsCore { .. } => "nats_core",
+            Self::NatsJetstream { .. } => "nats_jetstream",
+            Self::Solace { .. } => "solace",
+            Self::Websocket { .. } => "websocket",
         }
     }
 }
@@ -166,7 +236,7 @@ impl Default for AppConfig {
                 dir: None,
                 file_prefix: default_log_prefix(),
             },
-            nats: None,
+            transports: TransportsConfig::default(),
             tables: Vec::new(),
         }
     }
