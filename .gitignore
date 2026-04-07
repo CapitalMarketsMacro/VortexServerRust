@@ -3,6 +3,10 @@ dist/
 Vortex/dist/
 conan_output/
 Vortex/conan_output/
+
+# Local runtime config and logs
+config.json
+logs/
 .cache
 .clangd
 .DS_Store

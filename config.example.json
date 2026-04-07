@@ -1,0 +1,40 @@
+{
+  "server": {
+    "bind": "0.0.0.0:4000",
+    "ws_path": "/ws"
+  },
+  "logging": {
+    "level": "info,async_nats=warn",
+    "format": "pretty",
+    "dir": "logs",
+    "file_prefix": "vortex-server"
+  },
+  "nats": {
+    "url": "nats://MontuNobleNumbat2404:8821",
+    "name": "vortex-server",
+    "credentials_file": null
+  },
+  "tables": [
+    {
+      "name": "RatesMarketData",
+      "composite_index": ["MarketId", "Id"],
+      "stringify_columns": ["Bid", "Ask"],
+      "source": {
+        "transport": "core",
+        "subject": "rates.marketData",
+        "format": "json_row"
+      }
+    },
+    {
+      "name": "treasuries",
+      "index": "instrument",
+      "source": {
+        "transport": "jetstream",
+        "stream": "MARKET_DATA",
+        "subject": "market.treasuries.>",
+        "consumer": "vortex-treasuries",
+        "format": "json_rows"
+      }
+    }
+  ]
+}
