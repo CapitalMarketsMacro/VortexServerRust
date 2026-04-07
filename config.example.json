@@ -9,10 +9,19 @@
     "dir": "logs",
     "file_prefix": "vortex-server"
   },
-  "nats": {
-    "url": "nats://MontuNobleNumbat2404:8821",
-    "name": "vortex-server",
-    "credentials_file": null
+  "transports": {
+    "nats": {
+      "url": "nats://localhost:4222",
+      "name": "vortex-server",
+      "credentials_file": null
+    },
+    "solace": {
+      "host": "tcps://broker.example.com:55443",
+      "vpn": "default",
+      "username": "vortex",
+      "password": "REPLACE_ME",
+      "client_name": "vortex-server"
+    }
   },
   "tables": [
     {
@@ -20,20 +29,39 @@
       "composite_index": ["MarketId", "Id"],
       "stringify_columns": ["Bid", "Ask"],
       "source": {
-        "transport": "core",
+        "transport": "nats_core",
         "subject": "rates.marketData",
         "format": "json_row"
       }
     },
     {
-      "name": "treasuries",
-      "index": "instrument",
+      "name": "Orders",
+      "index": "OrderId",
       "source": {
-        "transport": "jetstream",
-        "stream": "MARKET_DATA",
-        "subject": "market.treasuries.>",
-        "consumer": "vortex-treasuries",
-        "format": "json_rows"
+        "transport": "nats_jetstream",
+        "stream": "ORDERS",
+        "subject": "orders.>",
+        "consumer": "vortex-orders",
+        "format": "json_row"
+      }
+    },
+    {
+      "name": "Executions",
+      "index": "ExecId",
+      "source": {
+        "transport": "solace",
+        "topic": "executions/>",
+        "format": "json_row"
+      }
+    },
+    {
+      "name": "MarketTicks",
+      "index": "tickId",
+      "source": {
+        "transport": "websocket",
+        "endpoint": "wss://feed.example.com/ticks",
+        "subprotocols": [],
+        "format": "json_row"
       }
     }
   ]

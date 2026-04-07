@@ -46,6 +46,9 @@ thiserror = "1"
 async-nats = "0.38"
 futures = "0.3"
 
+# WebSocket client (for Websocket-sourced tables)
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+
 [profile.dev]
 panic = "abort"
 opt-level = "s"
