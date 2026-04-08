@@ -118,7 +118,7 @@ pub struct Request {
     pub entity_id: ::prost::alloc::string::String,
     #[prost(
         oneof = "request::ClientReq",
-        tags = "3, 4, 37, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 36, 27, 28, 29, 30, 31, 32, 33, 34, 35"
+        tags = "3, 4, 37, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 36, 27, 28, 29, 30, 31, 32, 33, 34, 35, 38"
     )]
     pub client_req: ::core::option::Option<request::ClientReq>,
 }
@@ -202,6 +202,8 @@ pub mod request {
         ViewOnDeleteReq(super::ViewOnDeleteReq),
         #[prost(message, tag = "35")]
         ViewRemoveDeleteReq(super::ViewRemoveDeleteReq),
+        #[prost(message, tag = "38")]
+        MakeJoinTableReq(super::MakeJoinTableReq),
     }
 }
 #[derive(serde::Serialize)]
@@ -214,7 +216,7 @@ pub struct Response {
     pub entity_id: ::prost::alloc::string::String,
     #[prost(
         oneof = "response::ClientResp",
-        tags = "3, 4, 37, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 36, 27, 28, 29, 30, 31, 32, 33, 34, 35, 50"
+        tags = "3, 4, 37, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 36, 27, 28, 29, 30, 31, 32, 33, 34, 35, 38, 50"
     )]
     pub client_resp: ::core::option::Option<response::ClientResp>,
 }
@@ -294,6 +296,8 @@ pub mod response {
         ViewOnDeleteResp(super::ViewOnDeleteResp),
         #[prost(message, tag = "35")]
         ViewRemoveDeleteResp(super::ViewRemoveDeleteResp),
+        #[prost(message, tag = "38")]
+        MakeJoinTableResp(super::MakeJoinTableResp),
         #[prost(message, tag = "50")]
         ServerError(super::ServerError),
     }
@@ -562,6 +566,26 @@ pub mod make_table_req {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MakeTableResp {}
+/// `Client::join` — create a read-only table from a JOIN of two tables.
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MakeJoinTableReq {
+    #[prost(string, tag = "1")]
+    pub left_table_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub right_table_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub on_column: ::prost::alloc::string::String,
+    #[prost(enumeration = "JoinType", tag = "4")]
+    pub join_type: i32,
+    #[prost(string, tag = "5")]
+    pub right_on_column: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MakeJoinTableResp {}
 /// `Table::delete`
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -1203,6 +1227,38 @@ impl GroupRollupMode {
             "ROLLUP" => Some(Self::Rollup),
             "FLAT" => Some(Self::Flat),
             "TOTAL" => Some(Self::Total),
+            _ => None,
+        }
+    }
+}
+#[derive(serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum JoinType {
+    Inner = 0,
+    Left = 1,
+    Outer = 2,
+}
+impl JoinType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            JoinType::Inner => "INNER",
+            JoinType::Left => "LEFT",
+            JoinType::Outer => "OUTER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "INNER" => Some(Self::Inner),
+            "LEFT" => Some(Self::Left),
+            "OUTER" => Some(Self::Outer),
             _ => None,
         }
     }

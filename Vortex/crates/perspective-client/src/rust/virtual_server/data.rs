@@ -17,9 +17,12 @@ use arrow_array::builder::{
     BooleanBuilder, Float64Builder, Int32Builder, StringBuilder, TimestampMillisecondBuilder,
 };
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array,
-    Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray,
+    Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Decimal128Array, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray, RecordBatch,
+    StringArray, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
+    Time64NanosecondArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
 };
 use arrow_ipc::reader::{FileReader, StreamReader};
 use arrow_ipc::writer::StreamWriter;
@@ -301,7 +304,10 @@ fn extract_scalar(array: &ArrayRef, row_idx: usize) -> Scalar {
             let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
             Scalar::Float(arr.value(row_idx) as f64 * 86_400_000.0)
         },
-        _ => Scalar::String(format!("{:?}", array)),
+        _ => {
+            let scalar_arr = array.slice(row_idx, 1);
+            Scalar::String(format!("{:?}", scalar_arr))
+        },
     }
 }
 
@@ -356,8 +362,65 @@ fn coerce_column(
             Field::new(name, DataType::Timestamp(TimeUnit::Millisecond, None), true),
             array.clone(),
         )),
+        DataType::Int8 => {
+            let arr = array.as_any().downcast_ref::<Int8Array>().unwrap();
+            let result: Int32Array = arr.iter().map(|v| v.map(|v| v as i32)).collect();
+            Ok((
+                Field::new(name, DataType::Int32, true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::Int16 => {
+            let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
+            let result: Int32Array = arr.iter().map(|v| v.map(|v| v as i32)).collect();
+            Ok((
+                Field::new(name, DataType::Int32, true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::UInt8 => {
+            let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
+            let result: Int32Array = arr.iter().map(|v| v.map(|v| v as i32)).collect();
+            Ok((
+                Field::new(name, DataType::Int32, true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::UInt16 => {
+            let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+            let result: Int32Array = arr.iter().map(|v| v.map(|v| v as i32)).collect();
+            Ok((
+                Field::new(name, DataType::Int32, true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::UInt32 => {
+            let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+            let result: Int64Array = arr.iter().map(|v| v.map(|v| v as i64)).collect();
+            let result: Float64Array = result.iter().map(|v| v.map(|v| v as f64)).collect();
+            Ok((
+                Field::new(name, DataType::Float64, true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
         DataType::Int64 => {
             let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            let result: Float64Array = arr.iter().map(|v| v.map(|v| v as f64)).collect();
+            Ok((
+                Field::new(name, DataType::Float64, true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::UInt64 => {
+            let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+            let result: Float64Array = arr.iter().map(|v| v.map(|v| v as f64)).collect();
+            Ok((
+                Field::new(name, DataType::Float64, true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::Float32 => {
+            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
             let result: Float64Array = arr.iter().map(|v| v.map(|v| v as f64)).collect();
             Ok((
                 Field::new(name, DataType::Float64, true),
@@ -374,11 +437,75 @@ fn coerce_column(
                 Arc::new(result) as ArrayRef,
             ))
         },
+        DataType::Date64 => {
+            let arr = array.as_any().downcast_ref::<Date64Array>().unwrap();
+            let result: Date32Array = arr
+                .iter()
+                .map(|v| v.map(|v| (v / 86_400_000) as i32))
+                .collect();
+            Ok((
+                Field::new(name, DataType::Date32, true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
         DataType::Timestamp(unit, _) => {
             let casted = timestamp_to_millis(array, unit);
             Ok((
                 Field::new(name, DataType::Timestamp(TimeUnit::Millisecond, None), true),
                 casted,
+            ))
+        },
+        DataType::Time32(TimeUnit::Second) => {
+            let arr = array.as_any().downcast_ref::<Time32SecondArray>().unwrap();
+            let result: TimestampMillisecondArray =
+                arr.iter().map(|v| v.map(|v| v as i64 * 1_000)).collect();
+            Ok((
+                Field::new(name, DataType::Timestamp(TimeUnit::Millisecond, None), true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::Time32(TimeUnit::Millisecond) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Time32MillisecondArray>()
+                .unwrap();
+            let result: TimestampMillisecondArray =
+                arr.iter().map(|v| v.map(|v| v as i64)).collect();
+            Ok((
+                Field::new(name, DataType::Timestamp(TimeUnit::Millisecond, None), true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::Time64(TimeUnit::Microsecond) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Time64MicrosecondArray>()
+                .unwrap();
+            let result: TimestampMillisecondArray =
+                arr.iter().map(|v| v.map(|v| v / 1_000)).collect();
+            Ok((
+                Field::new(name, DataType::Timestamp(TimeUnit::Millisecond, None), true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::Time64(TimeUnit::Nanosecond) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<Time64NanosecondArray>()
+                .unwrap();
+            let result: TimestampMillisecondArray =
+                arr.iter().map(|v| v.map(|v| v / 1_000_000)).collect();
+            Ok((
+                Field::new(name, DataType::Timestamp(TimeUnit::Millisecond, None), true),
+                Arc::new(result) as ArrayRef,
+            ))
+        },
+        DataType::LargeUtf8 => {
+            let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
+            let result: StringArray = arr.iter().map(|v| v.map(|v| v.to_string())).collect();
+            Ok((
+                Field::new(name, DataType::Utf8, true),
+                Arc::new(result) as ArrayRef,
             ))
         },
         dt => {
@@ -393,7 +520,8 @@ fn coerce_column(
                 if array.is_null(i) {
                     builder.append_null();
                 } else {
-                    builder.append_value(format!("{:?}", array));
+                    let scalar_arr = array.slice(i, 1);
+                    builder.append_value(format!("{:?}", scalar_arr));
                 }
             }
             Ok((
@@ -518,7 +646,11 @@ impl VirtualDataSlice {
         }
 
         let new_schema = Arc::new(Schema::new(new_fields));
-        self.frozen = Some(RecordBatch::try_new(new_schema, new_arrays)?);
+        self.frozen = if new_arrays.is_empty() {
+            Some(RecordBatch::new_empty(new_schema))
+        } else {
+            Some(RecordBatch::try_new(new_schema, new_arrays)?)
+        };
         Ok(())
     }
 
@@ -658,7 +790,7 @@ impl VirtualDataSlice {
     }
 
     /// Serializes the data to a column-oriented JSON string.
-    pub(crate) fn render_to_columns_json(&mut self) -> Result<String, Box<dyn Error>> {
+    pub fn render_to_columns_json(&mut self) -> Result<String, Box<dyn Error>> {
         let batch = self.freeze().clone();
         let schema = batch.schema();
         let mut map = serde_json::Map::new();

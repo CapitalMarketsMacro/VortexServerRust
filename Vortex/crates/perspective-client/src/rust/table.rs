@@ -137,6 +137,22 @@ impl From<TableInitOptions> for TableOptions {
     }
 }
 
+/// Options for [`Client::join`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+pub struct JoinOptions {
+    #[serde(default)]
+    #[ts(optional)]
+    pub join_type: Option<crate::proto::JoinType>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+
+    #[serde(default)]
+    #[ts(optional)]
+    pub right_on: Option<String>,
+}
+
 /// Options for [`Table::delete`].
 #[derive(Clone, Debug, Default, Deserialize, TS)]
 pub struct DeleteOptions {
