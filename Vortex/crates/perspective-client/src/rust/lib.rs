@@ -38,6 +38,7 @@ mod client;
 mod session;
 mod table;
 mod table_data;
+mod table_ref;
 mod view;
 pub mod virtual_server;
 
@@ -51,11 +52,14 @@ pub mod utils;
 
 pub use crate::client::{Client, ClientHandler, Features, ReconnectCallback, SystemInfo};
 use crate::proto::HostedTable;
+pub use crate::proto::JoinType;
 pub use crate::session::{ProxySession, Session};
 pub use crate::table::{
-    DeleteOptions, ExprValidationResult, Table, TableInitOptions, TableReadFormat, UpdateOptions,
+    DeleteOptions, ExprValidationResult, JoinOptions, Table, TableInitOptions, TableReadFormat,
+    UpdateOptions,
 };
 pub use crate::table_data::{TableData, UpdateData};
+pub use crate::table_ref::TableRef;
 pub use crate::view::{
     ColumnWindow, OnUpdateData, OnUpdateMode, OnUpdateOptions, View, ViewWindow,
 };

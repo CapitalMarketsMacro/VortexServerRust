@@ -228,7 +228,17 @@ impl<'a> ViewQueryContext<'a> {
                     )
                 };
 
-                let pivot_using = self.select_clauses().join(", ");
+                let pivot_using: String = self
+                    .config
+                    .columns
+                    .iter()
+                    .flatten()
+                    .map(|col| {
+                        let escaped = col.replace('"', "\"\"").replace('_', "-");
+                        format!("first(\"{}\") as \"{}\"", escaped, escaped)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let mut row_id_cols = self.row_path_aliases.clone();
                 if !self.is_flat_mode() {
                     row_id_cols.push("__GROUPING_ID__".to_string());

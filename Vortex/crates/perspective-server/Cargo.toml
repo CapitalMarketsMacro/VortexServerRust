@@ -47,7 +47,7 @@ protobuf-src = { version = "2.1.1", optional = true }
 which = "7"
 
 [dependencies]
-perspective-client = { version = "4.3.0", path = "../perspective-client" }
+perspective-client = { version = "4.4.0", path = "../perspective-client" }
 
 # Key order is frequently implicitly relied upon in dynamic languages, so for
 # convenience we try to provide this (as well as explicit metadata calls).
