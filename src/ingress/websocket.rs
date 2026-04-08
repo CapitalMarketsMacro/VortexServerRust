@@ -1,13 +1,12 @@
 //! Plain WebSocket ingress.
 //!
-//! Each WebSocket-sourced table opens its own client connection to the
-//! configured endpoint. Messages (Text or Binary frames) are passed through
-//! the per-table transform pipeline and applied as table updates.
-//!
-//! On disconnect or connection error the consumer task reconnects with
-//! exponential backoff up to 30s, so a flapping upstream feed doesn't
-//! permanently take a table offline.
+//! Each WebSocket-sourced table runs in a supervised, panic-respawning task
+//! tied to its own [`TableSlot`] and its own isolated Perspective Server.
+//! Initial connect, first-message seed, and reconnection-after-disconnect
+//! all happen inside the spawned task — startup never blocks on a slow or
+//! unreachable feed.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
@@ -20,160 +19,270 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{PayloadFormat, TableConfig, TableSource};
+use crate::config::{ConnectRetryConfig, PayloadFormat, TableSource};
 use crate::ingress::apply;
-use crate::tables::TableRegistry;
+use crate::supervisor::supervise;
+use crate::tables::TableSlot;
 use crate::transform::RowTransform;
 
-/// How long to wait for the first message before failing startup.
-const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long to wait between reconnect attempts initially.
-const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
-/// Cap on the reconnect backoff.
-const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
+const FIRST_MESSAGE_WARN_AFTER: Duration = Duration::from_secs(60);
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-pub async fn start(
-    table_cfg: &TableConfig,
-    source: &TableSource,
+/// Fan out a single WebSocket-sourced table into a supervised background
+/// task. Returns immediately.
+pub fn start(slot: Arc<TableSlot>, transform: RowTransform, shutdown: CancellationToken) {
+    let task_name = format!("websocket:{}", slot.name);
+    supervise(task_name, shutdown.clone(), move || {
+        let slot = slot.clone();
+        let transform = transform.clone();
+        let shutdown = shutdown.clone();
+        async move {
+            if let Err(error) = run_table(slot, transform, shutdown).await {
+                tracing::error!(%error, "WebSocket ingress task error");
+            }
+        }
+    });
+}
+
+async fn run_table(
+    slot: Arc<TableSlot>,
     transform: RowTransform,
-    registry: &TableRegistry,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let (endpoint, subprotocols, format) = match source {
+    let (endpoint, subprotocols, format, retry) = match slot
+        .config
+        .source
+        .as_ref()
+        .ok_or_else(|| anyhow!("table '{}' has no source", slot.name))?
+        .clone()
+    {
         TableSource::Websocket {
             endpoint,
             subprotocols,
             format,
-        } => (endpoint.clone(), subprotocols.clone(), *format),
-        _ => unreachable!("dispatcher routes non-websocket sources elsewhere"),
+            connect_retry,
+        } => (endpoint, subprotocols, format, connect_retry),
+        _ => {
+            return Err(anyhow!(
+                "websocket::run_table called for non-websocket source on table '{}'",
+                slot.name
+            ));
+        }
     };
 
     tracing::info!(
-        table = %table_cfg.name,
+        table = %slot.name,
         endpoint = %endpoint,
-        "connecting WebSocket; waiting for first message to seed schema"
+        "connecting WebSocket"
     );
 
-    let mut stream = connect(&endpoint, &subprotocols)
-        .await
-        .with_context(|| format!("failed to connect to '{endpoint}'"))?;
+    // Initial connect with retry.
+    let mut stream =
+        match connect_with_retry(&endpoint, &subprotocols, &retry, &slot.name, &shutdown).await {
+            Ok(s) => s,
+            Err(ConnectFailure::Shutdown) => return Ok(()),
+            Err(ConnectFailure::Exhausted(error)) => {
+                return Err(anyhow!(
+                    "WebSocket initial connect failed for '{}' ({}): {error}",
+                    slot.name,
+                    endpoint
+                ));
+            }
+        };
 
-    let first_payload = timeout(FIRST_MESSAGE_TIMEOUT, recv_data_frame(&mut stream))
-        .await
-        .with_context(|| {
-            format!(
-                "timed out after {:?} waiting for first WebSocket message to \
-                 seed table '{}'",
-                FIRST_MESSAGE_TIMEOUT, table_cfg.name
-            )
-        })?
-        .with_context(|| format!("WebSocket '{endpoint}' closed before first message"))?;
+    // Wait for the first data frame to seed the table schema.
+    let first_payload = match wait_for_first_data_frame(&mut stream, &slot.name, &shutdown).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(e),
+    };
 
     let seed_json = transform.transform_to_json_rows(&first_payload, format)?;
-    let table = registry
-        .get_or_create_from_seed(table_cfg, seed_json)
-        .await?;
+    let table = slot.get_or_create_from_seed(seed_json).await?;
 
     tracing::info!(
-        table = %table_cfg.name,
+        table = %slot.name,
         endpoint = %endpoint,
         "table seeded from first WebSocket message"
     );
 
-    let cfg_clone = table_cfg.clone();
-    tokio::spawn(async move {
-        run_consumer(
-            stream,
-            endpoint,
-            subprotocols,
-            table,
-            format,
-            transform,
-            cfg_clone,
-            shutdown,
-        )
-        .await;
-    });
+    // Long-running consumer with reconnection.
+    run_consumer(
+        stream,
+        endpoint,
+        subprotocols,
+        retry,
+        table,
+        format,
+        transform,
+        slot,
+        shutdown,
+    )
+    .await;
 
     Ok(())
 }
 
-/// Long-running consumer loop with reconnection. Owns the initial connection
-/// (so we don't drop the seed-time stream and have to reconnect immediately)
-/// and reopens it with exponential backoff if it fails.
+enum ConnectFailure {
+    Shutdown,
+    Exhausted(anyhow::Error),
+}
+
+async fn connect_with_retry(
+    endpoint: &str,
+    subprotocols: &[String],
+    retry: &ConnectRetryConfig,
+    table_name: &str,
+    shutdown: &CancellationToken,
+) -> Result<WsStream, ConnectFailure> {
+    let mut backoff = retry.initial_backoff();
+    let max_backoff = retry.max_backoff();
+    let mut attempt: u32 = 0;
+
+    loop {
+        if shutdown.is_cancelled() {
+            return Err(ConnectFailure::Shutdown);
+        }
+
+        attempt += 1;
+        let label = retry.format_attempt(attempt);
+
+        match connect_once(endpoint, subprotocols).await {
+            Ok(stream) => {
+                tracing::info!(
+                    table = %table_name,
+                    endpoint = %endpoint,
+                    attempt = %label,
+                    "WebSocket connected"
+                );
+                return Ok(stream);
+            }
+            Err(error) => {
+                if !retry.is_unlimited() && attempt >= retry.max_attempts {
+                    return Err(ConnectFailure::Exhausted(error));
+                }
+                tracing::warn!(
+                    table = %table_name,
+                    endpoint = %endpoint,
+                    attempt = %label,
+                    %error,
+                    retry_in = ?backoff,
+                    "WebSocket connect failed, will retry"
+                );
+            }
+        }
+
+        tokio::select! {
+            _ = sleep(backoff) => {}
+            _ = shutdown.cancelled() => return Err(ConnectFailure::Shutdown),
+        }
+
+        backoff = (backoff * 2).min(max_backoff);
+    }
+}
+
+async fn connect_once(endpoint: &str, subprotocols: &[String]) -> anyhow::Result<WsStream> {
+    let mut request = endpoint
+        .into_client_request()
+        .with_context(|| format!("invalid WebSocket URL '{endpoint}'"))?;
+
+    if !subprotocols.is_empty() {
+        let header = subprotocols.join(", ");
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            HeaderValue::from_str(&header)
+                .with_context(|| format!("invalid subprotocol header '{header}'"))?,
+        );
+    }
+
+    let (stream, _response) = connect_async(request).await?;
+    Ok(stream)
+}
+
+async fn wait_for_first_data_frame(
+    stream: &mut WsStream,
+    table_name: &str,
+    shutdown: &CancellationToken,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => return Ok(None),
+            result = timeout(FIRST_MESSAGE_WARN_AFTER, stream.next()) => {
+                match result {
+                    Ok(Some(Ok(message))) => match message {
+                        Message::Text(text) => return Ok(Some(text.as_str().as_bytes().to_vec())),
+                        Message::Binary(bytes) => return Ok(Some(bytes.to_vec())),
+                        Message::Ping(payload) => {
+                            stream.send(Message::Pong(payload)).await?;
+                        }
+                        Message::Pong(_) | Message::Frame(_) => {}
+                        Message::Close(_) => {
+                            return Err(anyhow!("WebSocket closed before first data frame"));
+                        }
+                    },
+                    Ok(Some(Err(e))) => return Err(anyhow!(e)),
+                    Ok(None) => return Err(anyhow!("WebSocket stream ended before first data frame")),
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            table = %table_name,
+                            "still waiting for first WebSocket data frame to seed schema"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_consumer(
     mut stream: WsStream,
     endpoint: String,
     subprotocols: Vec<String>,
+    retry: ConnectRetryConfig,
     table: Table,
     format: PayloadFormat,
     transform: RowTransform,
-    cfg: TableConfig,
+    slot: Arc<TableSlot>,
     shutdown: CancellationToken,
 ) {
-    let mut backoff = INITIAL_RECONNECT_BACKOFF;
-
     loop {
-        // Pump messages on the current stream until it errors or closes.
-        let stream_outcome =
-            pump_stream(&mut stream, &table, format, &transform, &cfg, &shutdown).await;
+        let outcome = pump_stream(&mut stream, &table, format, &transform, &slot, &shutdown).await;
 
         if shutdown.is_cancelled() {
-            tracing::info!(table = %cfg.name, "websocket consumer stopping (shutdown)");
+            tracing::info!(table = %slot.name, "websocket consumer stopping (shutdown)");
             return;
         }
 
-        match stream_outcome {
-            StreamOutcome::Closed => {
-                tracing::warn!(
-                    table = %cfg.name,
-                    endpoint = %endpoint,
-                    "WebSocket closed by peer; reconnecting"
-                );
-            }
-            StreamOutcome::Error(error) => {
-                tracing::warn!(
-                    table = %cfg.name,
-                    endpoint = %endpoint,
-                    %error,
-                    "WebSocket consumer error; reconnecting"
-                );
-            }
+        match outcome {
+            StreamOutcome::Closed => tracing::warn!(
+                table = %slot.name,
+                endpoint = %endpoint,
+                "WebSocket closed by peer; reconnecting"
+            ),
+            StreamOutcome::Error(error) => tracing::warn!(
+                table = %slot.name,
+                endpoint = %endpoint,
+                %error,
+                "WebSocket consumer error; reconnecting"
+            ),
         }
 
-        // Reconnect loop with exponential backoff.
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    tracing::info!(table = %cfg.name, "websocket consumer stopping (shutdown)");
-                    return;
-                }
-                _ = sleep(backoff) => {}
+        match connect_with_retry(&endpoint, &subprotocols, &retry, &slot.name, &shutdown).await {
+            Ok(new_stream) => {
+                stream = new_stream;
             }
-
-            match connect(&endpoint, &subprotocols).await {
-                Ok(new_stream) => {
-                    tracing::info!(
-                        table = %cfg.name,
-                        endpoint = %endpoint,
-                        "WebSocket reconnected"
-                    );
-                    stream = new_stream;
-                    backoff = INITIAL_RECONNECT_BACKOFF;
-                    break;
-                }
-                Err(error) => {
-                    backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
-                    tracing::warn!(
-                        table = %cfg.name,
-                        endpoint = %endpoint,
-                        %error,
-                        retry_in = ?backoff,
-                        "WebSocket reconnect failed"
-                    );
-                }
+            Err(ConnectFailure::Shutdown) => return,
+            Err(ConnectFailure::Exhausted(error)) => {
+                tracing::error!(
+                    table = %slot.name,
+                    endpoint = %endpoint,
+                    %error,
+                    "WebSocket reconnect attempts exhausted; consumer task exiting"
+                );
+                return;
             }
         }
     }
@@ -189,7 +298,7 @@ async fn pump_stream(
     table: &Table,
     format: PayloadFormat,
     transform: &RowTransform,
-    cfg: &TableConfig,
+    slot: &TableSlot,
     shutdown: &CancellationToken,
 ) -> StreamOutcome {
     loop {
@@ -212,7 +321,7 @@ async fn pump_stream(
                             apply(table, text.as_str().as_bytes(), format, transform).await
                         {
                             tracing::error!(
-                                table = %cfg.name,
+                                table = %slot.name,
                                 %error,
                                 "failed to apply WebSocket text message"
                             );
@@ -223,7 +332,7 @@ async fn pump_stream(
                             apply(table, bytes.as_ref(), format, transform).await
                         {
                             tracing::error!(
-                                table = %cfg.name,
+                                table = %slot.name,
                                 %error,
                                 "failed to apply WebSocket binary message"
                             );
@@ -237,7 +346,7 @@ async fn pump_stream(
                     Message::Pong(_) | Message::Frame(_) => {}
                     Message::Close(frame) => {
                         tracing::info!(
-                            table = %cfg.name,
+                            table = %slot.name,
                             ?frame,
                             "WebSocket peer sent Close frame"
                         );
@@ -247,40 +356,4 @@ async fn pump_stream(
             }
         }
     }
-}
-
-/// Receive frames until we get a data frame (Text or Binary), discarding
-/// control frames. Used during seed-time so the first ping/pong handshake
-/// doesn't get mistaken for the seed payload.
-async fn recv_data_frame(stream: &mut WsStream) -> anyhow::Result<Vec<u8>> {
-    while let Some(message) = stream.next().await {
-        match message? {
-            Message::Text(text) => return Ok(text.as_str().as_bytes().to_vec()),
-            Message::Binary(bytes) => return Ok(bytes.to_vec()),
-            Message::Ping(payload) => {
-                stream.send(Message::Pong(payload)).await?;
-            }
-            Message::Pong(_) | Message::Frame(_) => {}
-            Message::Close(_) => return Err(anyhow!("WebSocket closed before first data frame")),
-        }
-    }
-    Err(anyhow!("WebSocket stream ended"))
-}
-
-async fn connect(endpoint: &str, subprotocols: &[String]) -> anyhow::Result<WsStream> {
-    let mut request = endpoint
-        .into_client_request()
-        .with_context(|| format!("invalid WebSocket URL '{endpoint}'"))?;
-
-    if !subprotocols.is_empty() {
-        let header = subprotocols.join(", ");
-        request.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            HeaderValue::from_str(&header)
-                .with_context(|| format!("invalid subprotocol header '{header}'"))?,
-        );
-    }
-
-    let (stream, _response) = connect_async(request).await?;
-    Ok(stream)
 }

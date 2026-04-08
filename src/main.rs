@@ -1,6 +1,7 @@
 mod config;
 mod ingress;
 mod logging;
+mod supervisor;
 mod tables;
 mod transform;
 
@@ -9,7 +10,6 @@ use std::path::PathBuf;
 
 use axum::Router;
 use clap::Parser;
-use perspective::server::Server;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
@@ -23,19 +23,16 @@ struct Cli {
     config: PathBuf,
 }
 
-// Multi-threaded runtime: safe because `perspective_server::ffi::Server`
-// serializes all C++ FFI calls through an internal `async_lock::Mutex`.
-// Without that mutex, concurrent FFI calls from different tokio workers
-// (NATS consumer vs Axum WS handler) corrupt the engine state because the
-// bundled C++ engine is built without `PSP_PARALLEL_FOR` and its internal
-// `ServerResources` locks are no-ops.
+// Multi-threaded runtime — safe and intentional. Each table runs on its
+// own isolated `perspective::server::Server` (one C++ engine instance per
+// table, one FFI mutex per table) so high-rate updates on one table cannot
+// contend on a lock with any other. Tokio's worker pool spreads the per-
+// table tasks across cores; bulkhead isolation is at the Perspective level.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let app_config = AppConfig::load(&cli.config)?;
-
-    // Keep the guard alive until shutdown so file logs are flushed on exit.
     let _log_guard = logging::init(&app_config.logging)?;
 
     tracing::info!(
@@ -44,29 +41,30 @@ async fn main() -> anyhow::Result<()> {
         "starting VortexServer"
     );
 
-    // Build Perspective server. Static tables are created eagerly; tables
-    // bound to a NATS source are created lazily on the first message so
-    // their schema can be inferred from real data.
-    let server = Server::new(None);
-    let registry = TableRegistry::new(server.new_local_client());
-    registry.create_static_tables(&app_config.tables).await?;
+    // Build one isolated Perspective Server per configured table.
+    let registry = TableRegistry::build(&app_config.tables);
+    registry.create_static_tables().await?;
 
-    tracing::info!(
-        static_tables = ?registry.names().await,
-        "static tables ready"
-    );
+    tracing::info!(tables = ?registry.names(), "table slots ready");
 
+    // Install the shutdown signal handler BEFORE spawning ingress tasks so
+    // Ctrl+C / SIGTERM are honored even during transport-connect retry
+    // loops at startup.
     let shutdown = CancellationToken::new();
+    {
+        let token = shutdown.clone();
+        tokio::spawn(async move { shutdown_signal(token).await });
+    }
 
-    // Start ingress for every table that has a source binding. The dispatcher
-    // walks the configured transports (NATS / Solace / WebSocket) and spawns
-    // a per-table consumer task for each.
+    // Start ingress for every table that has a source binding. Each table
+    // gets its own supervised, panic-respawning task. Per-table failures
+    // never propagate up — the HTTP listener always comes up.
     ingress::spawn_consumers(&app_config, registry.clone(), shutdown.clone()).await?;
 
-    // Build HTTP / WebSocket router.
-    let app = Router::new()
-        .route(&app_config.server.ws_path, perspective::axum::websocket_handler())
-        .with_state(server);
+    // Build the HTTP router. Every table is exposed under
+    // `{ws_path}/{table_name}`, with each route bound to that table's own
+    // Server instance — full isolation at the routing layer too.
+    let app = build_router(&registry, &app_config.server.ws_path);
 
     let listener = tokio::net::TcpListener::bind(&app_config.server.bind).await?;
     tracing::info!(
@@ -79,7 +77,10 @@ async fn main() -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal(shutdown.clone()));
+    .with_graceful_shutdown({
+        let token = shutdown.clone();
+        async move { token.cancelled().await }
+    });
 
     if let Err(error) = serve.await {
         tracing::error!(%error, "http server exited with error");
@@ -88,6 +89,33 @@ async fn main() -> anyhow::Result<()> {
     shutdown.cancel();
     tracing::info!("VortexServer stopped");
     Ok(())
+}
+
+/// Build a Router that mounts every table's WebSocket endpoint under a
+/// distinct path: `{ws_path}/{table_name}`. Each route uses its own
+/// per-table Perspective Server, so connections to different tables touch
+/// completely independent state.
+///
+/// Browser code:
+/// ```js
+/// const ws = new perspective.WebSocketClient("ws://host:4000/ws/Orders");
+/// const table = await ws.open_table("Orders");
+/// ```
+fn build_router(registry: &TableRegistry, ws_base: &str) -> Router {
+    let ws_base = ws_base.trim_end_matches('/').to_string();
+    let mut app: Router = Router::new();
+
+    for (name, slot) in registry.iter() {
+        let path = format!("{ws_base}/{name}");
+        let table_router: Router = Router::new()
+            .route("/", perspective::axum::websocket_handler())
+            .with_state(slot.server.clone());
+
+        app = app.nest(&path, table_router);
+        tracing::info!(table = %name, ws_path = %path, "registered WebSocket route");
+    }
+
+    app
 }
 
 async fn shutdown_signal(token: CancellationToken) {

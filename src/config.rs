@@ -78,10 +78,72 @@ pub struct NatsConfig {
     /// Optional credentials file (NATS .creds format).
     #[serde(default)]
     pub credentials_file: Option<String>,
+    /// Connect retry policy. The first connection attempt at startup uses
+    /// these settings before giving up.
+    #[serde(default)]
+    pub connect_retry: ConnectRetryConfig,
 }
 
 fn default_nats_name() -> String {
     "vortex-server".to_string()
+}
+
+/// Exponential-backoff connect retry policy. Used by every transport that
+/// has to establish an initial connection. With `max_attempts = 0` the
+/// connector retries forever; otherwise it gives up after `max_attempts`
+/// attempts and the affected tables are logged and skipped (the rest of
+/// vortex-server keeps running).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectRetryConfig {
+    /// Max connection attempts before giving up. `0` means retry forever.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// Initial backoff between attempts (milliseconds).
+    #[serde(default = "default_initial_backoff_ms")]
+    pub initial_backoff_ms: u64,
+    /// Cap on the backoff (milliseconds).
+    #[serde(default = "default_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+}
+
+fn default_max_attempts() -> u32 {
+    10
+}
+fn default_initial_backoff_ms() -> u64 {
+    1_000
+}
+fn default_max_backoff_ms() -> u64 {
+    30_000
+}
+
+impl Default for ConnectRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: default_max_attempts(),
+            initial_backoff_ms: default_initial_backoff_ms(),
+            max_backoff_ms: default_max_backoff_ms(),
+        }
+    }
+}
+
+impl ConnectRetryConfig {
+    pub fn initial_backoff(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.initial_backoff_ms)
+    }
+    pub fn max_backoff(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.max_backoff_ms)
+    }
+    pub fn is_unlimited(&self) -> bool {
+        self.max_attempts == 0
+    }
+    /// Format the current attempt count for logs, e.g. "3/10" or "3/∞".
+    pub fn format_attempt(&self, attempt: u32) -> String {
+        if self.is_unlimited() {
+            format!("{attempt}/∞")
+        } else {
+            format!("{attempt}/{}", self.max_attempts)
+        }
+    }
 }
 
 /// Solace PubSub+ broker connection settings. Currently scaffolded; the actual
@@ -185,6 +247,9 @@ pub enum TableSource {
         subprotocols: Vec<String>,
         #[serde(default = "default_payload_format")]
         format: PayloadFormat,
+        /// Initial connect + reconnect retry policy.
+        #[serde(default)]
+        connect_retry: ConnectRetryConfig,
     },
 }
 
