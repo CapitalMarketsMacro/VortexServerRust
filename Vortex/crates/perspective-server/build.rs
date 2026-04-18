@@ -225,6 +225,18 @@ fn conan_install(manifest_dir: &Path) -> PathBuf {
         "Conan is required but not found in PATH. Install with: pip install conan"
     );
 
+    // Ensure a default Conan profile exists (all host profiles inherit from it).
+    // `--exist-ok` is a no-op if the profile already exists.
+    let detect_status = Command::new("conan")
+        .args(["profile", "detect", "--exist-ok"])
+        .status()
+        .expect("Failed to run conan profile detect");
+    assert!(
+        detect_status.success(),
+        "conan profile detect failed with exit code {:?}",
+        detect_status.code()
+    );
+
     let profile = conan_profile();
     let profiles_dir = manifest_dir.join("conan").join("profiles");
     let profile_path = profiles_dir.join(profile);
