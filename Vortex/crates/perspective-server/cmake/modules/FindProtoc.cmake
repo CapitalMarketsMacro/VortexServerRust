@@ -7,7 +7,11 @@ function(download_protoc VERSION DESTINATION)
     if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
         set(PROTOC_ZIP "protoc-${VERSION}-win64.zip")
     elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
-        set(PROTOC_ZIP "protoc-${VERSION}-osx-x86_64.zip")
+        if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "aarch64")
+            set(PROTOC_ZIP "protoc-${VERSION}-osx-aarch_64.zip")
+        else()
+            set(PROTOC_ZIP "protoc-${VERSION}-osx-x86_64.zip")
+        endif()
     elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
         if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "aarch64")
             set(PROTOC_ZIP "protoc-${VERSION}-linux-aarch_64.zip")
@@ -35,7 +39,17 @@ function(download_protoc VERSION DESTINATION)
     endif()
 endfunction()
 
-find_program(Protobuf_EXECUTABLE NAMES protoc PATHS ${PSP_PROTOC_PATH} ENV PATH ${CMAKE_BINARY_DIR}/protoc-release/bin/)
+# First, try the explicitly provided path with NO_DEFAULT_PATH so that
+# a version-matched Conan protoc is preferred over whatever is on the
+# system PATH (which may be a different major version).
+find_program(Protobuf_EXECUTABLE NAMES protoc
+    PATHS ${PSP_PROTOC_PATH} ${CMAKE_BINARY_DIR}/protoc-release/bin/
+    NO_DEFAULT_PATH)
+
+# Fall back to the system PATH only if nothing was found above.
+if(NOT Protobuf_EXECUTABLE)
+    find_program(Protobuf_EXECUTABLE NAMES protoc)
+endif()
 
 if(NOT Protobuf_EXECUTABLE)
     message(STATUS "Protobuf_EXECUTABLE not found, searching for protoc")
