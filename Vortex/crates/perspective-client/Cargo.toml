@@ -24,7 +24,6 @@ links = "perspective_client"
 include = [
     "src/**/*",
     "Cargo.toml",
-    "package.json",
     "build.rs",
     "docs/**/*",
     "perspective.proto",
