@@ -49,6 +49,14 @@ futures = "0.3"
 # WebSocket client (for Websocket-sourced tables)
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 
+# Solace PubSub+ (libsolclient via FFI; build.rs auto-downloads the C tarball
+# unless SOLCLIENT_LIB_PATH or SOLCLIENT_TARBALL_URL is set). The -sys crate
+# is also pulled in directly so we can call solClient_msg_getBinaryAttachmentString
+# for SDT-STRING-wrapped payloads (e.g. from Solace's REST gateway), which the
+# high-level wrapper doesn't expose yet.
+solace-rs = "0.8"
+solace-rs-sys = "1.1"
+
 [profile.dev]
 panic = "abort"
 opt-level = "s"

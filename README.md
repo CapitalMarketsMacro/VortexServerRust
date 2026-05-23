@@ -21,6 +21,14 @@ VortexServer ingests streaming data from multiple transport protocols (NATS, Sol
 | **Conan** | 2.x | `pip install conan` |
 | **CMake** | 3.20+ | Required for C++ build |
 | **C++ compiler** | C++17 | Xcode (macOS), GCC (Linux), MSVC (Windows) |
+| **Docker** | 20.x+ | Only needed to run the bundled Solace test broker |
+
+The Solace transport links against `libsolclient` (Solace's official C
+API). The `solace-rs` crate's build script downloads a pinned tarball on
+first build — no manual install required. To pin to your own copy
+instead, set `SOLCLIENT_LIB_PATH=/path/to/lib` (containing
+`libsolclient.a`) before `cargo build`, or `SOLCLIENT_TARBALL_URL=...`
+to override the source URL.
 
 ## Quick Start
 
@@ -142,10 +150,18 @@ Each entry in the `tables` array creates a Perspective table exposed at `{ws_pat
 { "transport": "nats_jetstream", "stream": "ORDERS", "subject": "orders.>", "consumer": "vortex-orders", "format": "json_row" }
 ```
 
-**Solace** — subscribe to a Solace topic:
+**Solace** — direct-messaging topic subscription. One libsolclient session
+per table (per-table isolation matching the rest of the server); reconnect
+and subscription re-apply are handled inside libsolclient with our own
+backoff wrapping the initial connect:
 ```json
 { "transport": "solace", "topic": "executions/>", "format": "json_row" }
 ```
+
+Guaranteed/persistent delivery (queue or topic-endpoint binding) is not
+yet wired up — see `src/ingress/solace.rs` for the scope notes. To run a
+local broker for development, use the bundled docker-compose file (see
+below) and point the `transports.solace.host` at `tcp://localhost:55554`.
 
 **WebSocket** — connect to an upstream WebSocket feed:
 ```json
@@ -267,6 +283,35 @@ cargo test
 cargo fmt
 cargo clippy
 ```
+
+## Local Solace broker
+
+A `docker-compose.yml` is included for spinning up a single-node Solace
+broker for development against the Solace ingress:
+
+```bash
+docker compose up -d solace          # ~30s to ready
+docker compose logs -f solace        # tail logs
+docker compose down -v               # stop and wipe state
+```
+
+Once it's up, the PubSub+ Manager web UI is at <http://localhost:8080>
+(admin / admin). The SMF endpoint vortex-server connects to is
+`tcp://localhost:55554` — port 55555 inside the container is remapped
+because macOS reserves 55555 host-side. The bundled compose file also
+exposes port 9000 (REST messaging), which makes ad-hoc publishes a
+one-liner from the host:
+
+```bash
+curl -u default: -H 'Content-Type: application/json' \
+  -X POST -d '{"ExecId":"E1","price":100.5,"qty":10}' \
+  http://localhost:9000/TOPIC/executions/test
+```
+
+Solace's REST gateway wraps text payloads in an SDT-string envelope on
+the SMF side, which the Solace ingress detects and unwraps automatically
+(via `solClient_msg_getBinaryAttachmentString`), so the same code path
+also accepts raw-binary publishes from native SMF clients.
 
 ## Platform Support
 

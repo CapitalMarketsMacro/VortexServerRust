@@ -76,27 +76,30 @@ pub async fn spawn_consumers(
         None
     };
 
-    let solace_ok = if needs_solace {
+    // Solace context (libsolclient init only — no network I/O here).
+    // Per-table tasks open their own session inside the supervisor loop.
+    let solace_ctx = if needs_solace {
         match config.transports.solace.as_ref() {
             None => {
                 tracing::error!(
                     "at least one table uses Solace but [transports.solace] is not configured"
                 );
-                false
+                None
             }
-            Some(cfg) => match solace::validate_config(cfg) {
-                Ok(()) => true,
+            Some(cfg) => match solace::connect(cfg) {
+                Ok(ctx) => Some(ctx),
                 Err(error) => {
                     tracing::error!(
                         %error,
-                        "Solace transport unavailable; tables sourced from Solace will be skipped"
+                        "Solace transport unavailable; tables sourced from Solace will be skipped \
+                         (vortex-server will keep running)"
                     );
-                    false
+                    None
                 }
             },
         }
     } else {
-        false
+        None
     };
 
     // Fan out: one supervised task per table. Each task owns its slot's
@@ -124,17 +127,14 @@ pub async fn spawn_consumers(
                 nats::start(ctx, slot, transform, shutdown.clone());
             }
             TableSource::Solace { .. } => {
-                if !solace_ok {
+                let Some(ctx) = solace_ctx.clone() else {
                     tracing::warn!(
                         table = %slot.name,
                         "skipping table — Solace transport is unavailable"
                     );
                     continue;
-                }
-                tracing::warn!(
-                    table = %slot.name,
-                    "Solace ingress not yet implemented — table will not receive data"
-                );
+                };
+                solace::start(ctx, slot, transform, shutdown.clone());
             }
             TableSource::Websocket { .. } => {
                 websocket::start(slot, transform, shutdown.clone());

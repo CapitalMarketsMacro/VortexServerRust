@@ -1,0 +1,54 @@
+# Local Solace PubSub+ broker for testing the Solace ingress.
+#
+#   docker compose up -d solace          # start the broker (~30s to ready)
+#   docker compose logs -f solace        # tail logs
+#   docker compose down -v               # stop and wipe state
+#
+# Web UI (PubSub+ Manager): http://localhost:8080  (admin / admin)
+# SMF endpoint for vortex-server's config:  tcp://localhost:55554
+#
+# Port 55555 (SMF) is remapped to 55554 on the host because macOS Big Sur
+# and later reserve 55555 for system services; using 55554 keeps the same
+# layout working on every platform.
+
+services:
+  solace:
+    image: solace/solace-pubsub-standard:latest
+    container_name: vortex-solace
+    shm_size: 1g
+    ulimits:
+      core: 2
+      # Solace's POST check requires hard nofile >= 1048576; lower values
+      # cause the broker to crash-loop on startup with "POST Violation 022".
+      nofile:
+        soft: 2448
+        hard: 1048576
+    ports:
+      # SMF — the protocol libsolclient (and therefore vortex-server) speaks.
+      - "55554:55555"
+      # SMF over TLS — use this if you point vortex-server at tcps://.
+      - "55443:55443"
+      # PubSub+ Manager web UI + SEMP REST.
+      - "8080:8080"
+      # WebSocket SMF (browser clients, not used by vortex-server itself).
+      - "8008:8008"
+      # REST messaging — handy for ad-hoc test publishes via curl.
+      - "9000:9000"
+    environment:
+      - username_admin_globalaccesslevel=admin
+      - username_admin_password=admin
+      - system_scaling_maxconnectioncount=100
+    volumes:
+      - solace-storage:/var/lib/solace
+    restart: unless-stopped
+    healthcheck:
+      # SEMP __about/api returns 200 only when the management plane is up
+      # AND the messaging plane is ready to accept clients. Auth is required.
+      test: ["CMD-SHELL", "curl -sfu admin:admin http://localhost:8080/SEMP/v2/__about/api >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 60s
+
+volumes:
+  solace-storage:

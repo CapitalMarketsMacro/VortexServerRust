@@ -16,10 +16,10 @@
       "credentials_file": null
     },
     "solace": {
-      "host": "tcps://broker.example.com:55443",
+      "host": "tcp://localhost:55554",
       "vpn": "default",
-      "username": "vortex",
-      "password": "REPLACE_ME",
+      "username": "default",
+      "password": "",
       "client_name": "vortex-server"
     }
   },
