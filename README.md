@@ -15,29 +15,52 @@ VortexServer ingests streaming data from multiple transport protocols (NATS, Sol
 
 ## Prerequisites
 
-| Tool | Version | Notes |
-|------|---------|-------|
-| **Rust** | nightly-2026-01-01 | Set automatically via `rust-toolchain.toml` |
-| **Conan** | 2.x | `pip install conan` |
-| **CMake** | 3.20+ | Required for C++ build |
-| **C++ compiler** | C++17 | Xcode (macOS), GCC (Linux), MSVC (Windows) |
-| **Docker** | 20.x+ | Only needed to run the bundled Solace test broker |
+| Tool | Version | Required for | Notes |
+|------|---------|----|-------|
+| **Rust** | nightly-2026-01-01 | building vortex-server | Set automatically via `rust-toolchain.toml` (run `rustup show` to install) |
+| **Conan** | 2.x | C++ deps for the Perspective engine | `pip install conan`; first build runs `conan install` automatically |
+| **CMake** | 3.20+ | C++ build | |
+| **C++ compiler** | C++17 | C++ build | Xcode (macOS), GCC/Clang (Linux), **MSVC 2022 with the “Desktop development with C++” workload** (Windows) |
+| **Docker** | 20.x+ | running the bundled Solace test broker | Docker Desktop on macOS / Windows; Docker Engine on Linux. Compose v2 (`docker compose ...`) required. |
+| **Python** | 3.10+ | running the Python simulators | Optional; only if you want to run `simulators/*/python/` |
+| **Node.js** | 18+ | running the Node simulators | Optional; only if you want to run `simulators/*/nodejs/` |
 
 The Solace transport links against `libsolclient` (Solace's official C
-API). The `solace-rs` crate's build script downloads a pinned tarball on
-first build — no manual install required. To pin to your own copy
-instead, set `SOLCLIENT_LIB_PATH=/path/to/lib` (containing
-`libsolclient.a`) before `cargo build`, or `SOLCLIENT_TARBALL_URL=...`
-to override the source URL.
+API). The `solace-rs` crate's build script downloads a pinned tarball
+on first build — no manual install required, on any platform. To pin to
+your own copy instead, set `SOLCLIENT_LIB_PATH=/path/to/lib` (containing
+the static lib, named `libsolclient.a` on macOS/Linux or
+`libsolclient_s.lib` on Windows) before `cargo build`, or
+`SOLCLIENT_TARBALL_URL=...` to override the download URL.
+
+### Platform-specific notes
+
+- **macOS** (Intel or Apple Silicon): the standard Xcode Command Line
+  Tools are sufficient. The Solace path links system Kerberos
+  (`gssapi_krb5`) — already present on macOS by default.
+- **Windows 10/11 (x86_64)**: install MSVC 2022 via the Visual Studio
+  Installer with the "Desktop development with C++" workload checked
+  (this also installs the Windows 10/11 SDK and CMake). Run all commands
+  from PowerShell, **not** WSL — vortex-server's build is the native
+  Windows build (`x86_64-pc-windows-msvc`). The bundled bash scripts
+  (`scripts/*.sh`) are mirrored by PowerShell scripts (`scripts/*.ps1`);
+  use the `.ps1` ones natively. Git for Windows is recommended for the
+  `git` client.
+- **Linux** (x86_64): need build-essential / gcc-c++, plus the
+  `docker-compose-plugin` package if you want the broker. Distro
+  packages of Conan are usually stale — install via pip.
 
 ## Quick Start
+
+### macOS / Linux
 
 ```bash
 # 1. Clone
 git clone https://github.com/CapitalMarketsMacro/VortexServerRust.git
 cd VortexServerRust
 
-# 2. Build (first run builds C++ dependencies via Conan — ~15-20 min, cached after)
+# 2. Build (first run builds C++ dependencies via Conan + libsolclient download
+#    — ~15-20 min, cached after)
 cargo build
 
 # 3. Copy and edit configuration
@@ -47,7 +70,25 @@ cp config.example.json config.json
 cargo run -p vortex-server
 ```
 
-The server binds to `0.0.0.0:4000` by default. Connect a Perspective viewer:
+### Windows (PowerShell)
+
+```powershell
+# 1. Clone
+git clone https://github.com/CapitalMarketsMacro/VortexServerRust.git
+Set-Location VortexServerRust
+
+# 2. Build — same toolchain story as on Unix; expect ~15-20 min on first run
+cargo build
+
+# 3. Copy and edit configuration
+Copy-Item config.example.json config.json
+
+# 4. Run
+cargo run -p vortex-server
+```
+
+The server binds to `0.0.0.0:4000` by default. Connect a Perspective
+viewer:
 
 ```javascript
 const viewer = document.querySelector("perspective-viewer");
@@ -55,6 +96,12 @@ const ws = new perspective.WebSocketClient("ws://localhost:4000/ws");
 const table = await ws.open_table("Orders");
 await viewer.load(table);
 ```
+
+> **Want to see data flow end-to-end without writing a publisher first?**
+> The repo ships a Solace broker (`docker-compose.yml`) and per-transport
+> data simulators (`simulators/`) with launch scripts on both platforms.
+> See [Local Solace broker](#local-solace-broker) and
+> [Data simulators](#data-simulators) below for the full demo recipe.
 
 ## Configuration
 
@@ -244,17 +291,33 @@ stateDiagram-v2
 ## Project Structure
 
 ```
-src/main.rs                — VortexServer application entry point
+src/                       — VortexServer application
+  main.rs                  — Entry point
+  config.rs                — JSON config + env overrides
+  ingress/                 — Per-transport consumers (NATS, Solace, WebSocket)
+  supervisor.rs            — Panic-respawning task wrapper
+  tables.rs                — TableSlot: one Perspective engine per table
+  transform.rs             — Row transforms (stringify nested, composite PK)
+  logging.rs               — Structured logging setup
 Cargo.toml                 — Workspace root + vortex-server package
-config.example.json        — Example configuration
+config.example.json        — End-to-end example: one table per transport
 rust-toolchain.toml        — Pinned nightly toolchain
-Vortex/                    — Perspective engine (C++ + Rust bindings)
+docker-compose.yml         — Solace broker for local testing
+scripts/                   — Cross-platform broker + simulator launchers
+  solace.{sh,ps1}          — Manage the Docker Solace broker
+  sim-<transport>-<lang>.{sh,ps1}  — 12 simulator launchers
+simulators/                — Synthetic-data publishers (Python + Node)
+  README.md                — Detailed simulator docs and payload schemas
+  nats/{python,nodejs}/    — NATS Core + JetStream publisher
+  solace/{python,nodejs}/  — Solace REST messaging publisher
+  websocket/{python,nodejs}/  — WebSocket server (vortex connects to it)
+Vortex/                    — Perspective engine dependency (C++ + Rust bindings)
   crates/
     perspective/           — Facade crate (re-exports client/server, Axum WS handler)
     perspective-client/    — Protocol definitions (protobuf), Arrow types, Client/Session/Table/View
     perspective-server/    — C++ engine bridge (FFI, build.rs + CMake + Conan)
   examples/axum-server/    — Standalone example with simulated Treasury bond data
-  build.sh / build.bat     — Full C++ + Rust build scripts
+  build.sh / build.bat     — Full C++ + Rust build scripts (rarely needed)
 ```
 
 ## Build Commands
@@ -366,6 +429,126 @@ Solace's REST gateway wraps text payloads in an SDT-string envelope on
 the SMF side, which the Solace ingress detects and unwraps automatically
 (via `solClient_msg_getBinaryAttachmentString`), so the same code path
 also accepts raw-binary publishes from native SMF clients.
+
+## Data simulators
+
+`simulators/` contains synthetic-data publishers for every transport, in
+both Python and Node.js (pick whichever runtime is already installed).
+Each one emits rows whose schema matches the corresponding table in
+`config.example.json`, so they're immediately usable by a Perspective
+viewer:
+
+| Transport | Vortex table | What the simulator does | Default endpoint |
+|---|---|---|---|
+| NATS Core | `RatesMarketData` | Publish JSON rows with nested Bid/Ask ladders | `nats://localhost:4222` (subject `rates.marketData`) |
+| NATS JetStream | `Orders` | Publish JSON order rows on `orders.<symbol>`; creates the `ORDERS` stream on first run | `nats://localhost:4222` |
+| Solace | `Executions` | Publish JSON execution rows via Solace REST messaging | `http://localhost:9000` (topic `executions/test`) |
+| WebSocket | `MarketTicks` | Run a WebSocket *server* that streams JSON ticks to anyone who connects | `ws://localhost:8765/ticks` |
+
+Twelve launch scripts (six bash + six PowerShell mirrors) sit under
+`scripts/sim-<transport>-<lang>.{sh,ps1}`. Each one lazily creates the
+per-simulator dependency tree (`.venv/` for Python, `node_modules/` for
+Node) on first invocation, then execs the entry point with every CLI
+flag forwarded through.
+
+### Common flags
+
+The same flags work on every simulator, in both runtimes:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--rate-ms=N` | `200` | Inter-message delay (≈ 5 msg/s by default) |
+| `--count=N` | `0` | Stop after N messages (`0` = run forever) |
+| `--seed=N` | random | Deterministic payload PRNG seed for reproducible runs |
+
+### macOS / Linux
+
+```bash
+# NATS Core (publishes rates.marketData; needs a NATS server at :4222)
+./scripts/sim-nats-py.sh                       # Python
+./scripts/sim-nats-js.sh                       # Node
+
+# NATS JetStream
+./scripts/sim-nats-py.sh --mode=jetstream
+./scripts/sim-nats-js.sh --mode=jetstream
+
+# Solace (needs the bundled broker — see Local Solace broker above)
+./scripts/sim-solace-py.sh
+./scripts/sim-solace-js.sh
+
+# WebSocket server (no broker needed; vortex-server connects to it)
+./scripts/sim-ws-py.sh
+./scripts/sim-ws-js.sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+.\scripts\sim-nats-py.ps1
+.\scripts\sim-nats-js.ps1 --mode=jetstream
+.\scripts\sim-solace-py.ps1
+.\scripts\sim-solace-js.ps1
+.\scripts\sim-ws-py.ps1
+.\scripts\sim-ws-js.ps1
+```
+
+See `simulators/README.md` for the per-simulator payload schemas,
+transport-specific flags, and notes on what's intentionally minimal.
+
+## Full local stack
+
+A complete end-to-end demo — broker, server, and one simulator per
+transport — wired through the bundled `config.example.json`:
+
+**macOS / Linux**
+
+```bash
+# Terminal 1 — Solace broker (Docker; ~30-90s first start)
+./scripts/solace.sh start
+
+# Terminal 2 — vortex-server (uses config.example.json as a starting point;
+# edit it to flip the WebSocket endpoint to ws://localhost:8765/ticks before
+# running, so the bundled WS simulator feeds the MarketTicks table)
+cp config.example.json config.json
+$EDITOR config.json
+cargo run -p vortex-server -- --config config.json
+
+# Terminal 3 — WebSocket simulator (vortex connects to it)
+./scripts/sim-ws-py.sh
+
+# Terminal 4 — Solace simulator (publishes executions/test → Executions table)
+./scripts/sim-solace-py.sh
+
+# (Optional) Terminal 5 + 6 — NATS simulators, if you have a NATS server running
+./scripts/sim-nats-py.sh                       # rates.marketData
+./scripts/sim-nats-py.sh --mode=jetstream      # orders.*
+```
+
+**Windows (PowerShell)**
+
+```powershell
+# Terminal 1
+.\scripts\solace.ps1 start
+
+# Terminal 2
+Copy-Item config.example.json config.json
+notepad config.json     # flip the WS endpoint to ws://localhost:8765/ticks
+cargo run -p vortex-server -- --config config.json
+
+# Terminal 3
+.\scripts\sim-ws-py.ps1
+
+# Terminal 4
+.\scripts\sim-solace-py.ps1
+
+# Optional NATS terminals (need a NATS server)
+.\scripts\sim-nats-py.ps1
+.\scripts\sim-nats-py.ps1 --mode=jetstream
+```
+
+Once all are running, the server logs should show `seeded` and continuous
+`apply` activity for every active table. Connect a `<perspective-viewer>`
+to `ws://localhost:4000/ws/<TableName>` to view live data.
 
 ## Platform Support
 
