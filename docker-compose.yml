@@ -1,15 +1,22 @@
-# Local Solace PubSub+ broker for testing the Solace ingress.
+# Local brokers for testing vortex-server's ingress paths.
 #
-#   docker compose up -d solace          # start the broker (~30s to ready)
-#   docker compose logs -f solace        # tail logs
-#   docker compose down -v               # stop and wipe state
+# The two services are independent — start whichever you need.
 #
-# Web UI (PubSub+ Manager): http://localhost:8080  (admin / admin)
-# SMF endpoint for vortex-server's config:  tcp://localhost:55554
+#   docker compose up -d solace          # Solace broker (~60s to healthy)
+#   docker compose up -d nats            # NATS broker with JetStream (~5s)
+#   docker compose up -d                 # both
 #
-# Port 55555 (SMF) is remapped to 55554 on the host because macOS Big Sur
-# and later reserve 55555 for system services; using 55554 keeps the same
-# layout working on every platform.
+#   docker compose logs -f solace        # tail solace
+#   docker compose logs -f nats          # tail nats
+#   docker compose down                  # stop everything, preserve volumes
+#   docker compose down -v               # stop AND wipe persisted state
+#
+# Endpoints once running:
+#   Solace SMF       tcp://localhost:55554     (vortex-server target)
+#   Solace REST      http://localhost:9000
+#   Solace Manager   http://localhost:8080     (admin / admin)
+#   NATS clients     nats://localhost:4222     (vortex-server target)
+#   NATS monitoring  http://localhost:8222     (varz, jsz, healthz)
 
 services:
   solace:
@@ -25,6 +32,9 @@ services:
         hard: 1048576
     ports:
       # SMF — the protocol libsolclient (and therefore vortex-server) speaks.
+      # Port 55555 inside the container is remapped to 55554 on the host
+      # because macOS Big Sur+ reserves 55555 for system services; we keep
+      # the same mapping everywhere for parity.
       - "55554:55555"
       # SMF over TLS — use this if you point vortex-server at tcps://.
       - "55443:55443"
@@ -52,5 +62,38 @@ services:
       retries: 12
       start_period: 60s
 
+  nats:
+    # Alpine variant ships busybox-wget so we can run a real healthcheck;
+    # the default `nats:latest` is a scratch image with the binary only.
+    image: nats:alpine
+    container_name: vortex-nats
+    command:
+      - "--name=vortex-nats"
+      # Enable JetStream (required by the orders.* simulator). Persistent
+      # data lands in /data, which is mounted from the named volume so a
+      # `docker compose down` (without -v) preserves stream state.
+      - "--jetstream"
+      - "--store_dir=/data"
+      # HTTP monitoring endpoint for /healthz, /varz, /jsz.
+      - "--http_port=8222"
+    ports:
+      # Client connections — what vortex-server's NATS ingress and the
+      # simulators connect to.
+      - "4222:4222"
+      # HTTP monitoring (status, JetStream introspection, healthz).
+      - "8222:8222"
+    volumes:
+      - nats-storage:/data
+    restart: unless-stopped
+    healthcheck:
+      # /healthz returns 200 when the server is fully started and (with
+      # JetStream enabled) the JS meta cluster is ready.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
 volumes:
   solace-storage:
+  nats-storage:

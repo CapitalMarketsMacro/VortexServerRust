@@ -430,6 +430,46 @@ the SMF side, which the Solace ingress detects and unwraps automatically
 (via `solClient_msg_getBinaryAttachmentString`), so the same code path
 also accepts raw-binary publishes from native SMF clients.
 
+## Local NATS broker
+
+The same `docker-compose.yml` also ships a NATS service (`nats:alpine`
+with JetStream enabled and persistent storage), independent of the
+Solace one — start whichever you need. A pair of helper scripts mirrors
+the Solace pattern: `scripts/nats.sh` for macOS/Linux,
+`scripts/nats.ps1` for Windows.
+
+```bash
+# macOS / Linux
+./scripts/nats.sh start              # ~5s to healthy
+./scripts/nats.sh status             # client port + JetStream summary
+./scripts/nats.sh logs               # tail
+./scripts/nats.sh stop               # preserve JetStream data
+./scripts/nats.sh stop --wipe        # also wipe the volume
+
+# Windows (PowerShell) — identical surface
+.\scripts\nats.ps1 start
+.\scripts\nats.ps1 status
+.\scripts\nats.ps1 logs
+.\scripts\nats.ps1 stop
+.\scripts\nats.ps1 stop -Wipe
+```
+
+Endpoints once running:
+
+- **Client connections** `nats://localhost:4222` — vortex-server's NATS
+  ingress and the NATS simulators connect here
+- **HTTP monitoring** <http://localhost:8222> — `/varz` for server stats,
+  `/jsz` for JetStream introspection, `/healthz` for readiness probes
+
+JetStream data persists in the `vortexserverrust_nats-storage` Docker
+volume across `stop`/`start`, so a stream + messages remain after a
+restart. `stop --wipe` removes the volume so the next start is a clean
+slate.
+
+The NATS JetStream simulators create the `ORDERS` stream on first run if
+it doesn't already exist (idempotent), so once the broker is up you can
+go straight to publishing without any manual SEMP/CLI setup.
+
 ## Data simulators
 
 `simulators/` contains synthetic-data publishers for every transport, in
@@ -464,15 +504,15 @@ The same flags work on every simulator, in both runtimes:
 ### macOS / Linux
 
 ```bash
-# NATS Core (publishes rates.marketData; needs a NATS server at :4222)
+# NATS Core (publishes rates.marketData; needs the bundled NATS broker)
 ./scripts/sim-nats-py.sh                       # Python
 ./scripts/sim-nats-js.sh                       # Node
 
-# NATS JetStream
+# NATS JetStream — auto-creates the ORDERS stream on first run
 ./scripts/sim-nats-py.sh --mode=jetstream
 ./scripts/sim-nats-js.sh --mode=jetstream
 
-# Solace (needs the bundled broker — see Local Solace broker above)
+# Solace (needs the bundled Solace broker)
 ./scripts/sim-solace-py.sh
 ./scripts/sim-solace-js.sh
 
@@ -503,25 +543,26 @@ transport — wired through the bundled `config.example.json`:
 **macOS / Linux**
 
 ```bash
-# Terminal 1 — Solace broker (Docker; ~30-90s first start)
+# Terminal 1 — start both brokers (Solace ~60s, NATS ~5s)
 ./scripts/solace.sh start
+./scripts/nats.sh start
 
-# Terminal 2 — vortex-server (uses config.example.json as a starting point;
-# edit it to flip the WebSocket endpoint to ws://localhost:8765/ticks before
-# running, so the bundled WS simulator feeds the MarketTicks table)
+# Terminal 2 — vortex-server (start from the example config; flip the
+# WebSocket endpoint to ws://localhost:8765/ticks so the bundled WS
+# simulator can feed the MarketTicks table)
 cp config.example.json config.json
 $EDITOR config.json
 cargo run -p vortex-server -- --config config.json
 
-# Terminal 3 — WebSocket simulator (vortex connects to it)
+# Terminal 3 — WebSocket simulator (vortex-server connects to it)
 ./scripts/sim-ws-py.sh
 
 # Terminal 4 — Solace simulator (publishes executions/test → Executions table)
 ./scripts/sim-solace-py.sh
 
-# (Optional) Terminal 5 + 6 — NATS simulators, if you have a NATS server running
-./scripts/sim-nats-py.sh                       # rates.marketData
-./scripts/sim-nats-py.sh --mode=jetstream      # orders.*
+# Terminals 5 + 6 — NATS simulators (point at the bundled NATS broker)
+./scripts/sim-nats-py.sh                       # rates.marketData → RatesMarketData
+./scripts/sim-nats-py.sh --mode=jetstream      # orders.<symbol> → Orders
 ```
 
 **Windows (PowerShell)**
@@ -529,6 +570,7 @@ cargo run -p vortex-server -- --config config.json
 ```powershell
 # Terminal 1
 .\scripts\solace.ps1 start
+.\scripts\nats.ps1 start
 
 # Terminal 2
 Copy-Item config.example.json config.json
@@ -541,7 +583,7 @@ cargo run -p vortex-server -- --config config.json
 # Terminal 4
 .\scripts\sim-solace-py.ps1
 
-# Optional NATS terminals (need a NATS server)
+# Terminals 5 + 6
 .\scripts\sim-nats-py.ps1
 .\scripts\sim-nats-py.ps1 --mode=jetstream
 ```
