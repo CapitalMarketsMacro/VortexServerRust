@@ -115,47 +115,33 @@ VORTEX_CONFIG=path/to/config.json cargo run -p vortex-server
 
 ### Example Configuration
 
-```json
+[`config.example.json`](config.example.json) at the repo root is a
+complete, ready-to-run config wired to the bundled brokers and
+WebSocket simulator — four tables (one per transport). Copy it to
+`config.json` and run vortex-server as-is, no edits needed.
+
+Top-level shape:
+
+```jsonc
 {
-  "server": {
-    "bind": "0.0.0.0:4000",
-    "ws_path": "/ws"
-  },
-  "logging": {
-    "level": "info,async_nats=warn",
-    "format": "pretty",
-    "dir": "logs",
-    "file_prefix": "vortex-server"
-  },
+  "server":     { "bind": "0.0.0.0:4000", "ws_path": "/ws" },
+  "logging":    { "level": "info", "format": "pretty", "dir": "logs", "file_prefix": "vortex-server" },
   "transports": {
-    "nats": {
-      "url": "nats://localhost:4222",
-      "name": "vortex-server",
-      "credentials_file": null
-    },
-    "solace": {
-      "host": "tcps://broker.example.com:55443",
-      "vpn": "default",
-      "username": "vortex",
-      "password": "REPLACE_ME",
-      "client_name": "vortex-server"
-    }
+    "nats":   { "url": "nats://localhost:4222", "name": "vortex-server", "credentials_file": null },
+    "solace": { "host": "tcp://localhost:55554", "vpn": "default",
+                "username": "default", "password": "", "client_name": "vortex-server" }
   },
   "tables": [
-    {
-      "name": "Orders",
-      "index": "OrderId",
-      "source": {
-        "transport": "nats_jetstream",
-        "stream": "ORDERS",
-        "subject": "orders.>",
-        "consumer": "vortex-orders",
-        "format": "json_row"
-      }
-    }
+    { "name": "Orders", "index": "OrderId",
+      "source": { "transport": "nats_jetstream", "stream": "ORDERS",
+                  "subject": "orders.>", "consumer": "vortex-orders",
+                  "format": "json_row" } }
+    /* … one entry per table you want to serve; see the example file */
   ]
 }
 ```
+
+The field reference for each section follows below.
 
 ### Server
 
@@ -210,9 +196,12 @@ yet wired up — see `src/ingress/solace.rs` for the scope notes. To run a
 local broker for development, use the bundled docker-compose file (see
 below) and point the `transports.solace.host` at `tcp://localhost:55554`.
 
-**WebSocket** — connect to an upstream WebSocket feed:
+**WebSocket** — connect to an upstream WebSocket feed (the bundled
+`config.example.json` points at `ws://localhost:8765/ticks` so the
+included WS simulator works out of the box; swap in your real endpoint
+for production):
 ```json
-{ "transport": "websocket", "endpoint": "wss://feed.example.com/ticks", "format": "json_row" }
+{ "transport": "websocket", "endpoint": "ws://localhost:8765/ticks", "format": "json_row" }
 ```
 
 ## Architecture
@@ -547,11 +536,9 @@ transport — wired through the bundled `config.example.json`:
 ./scripts/solace.sh start
 ./scripts/nats.sh start
 
-# Terminal 2 — vortex-server (start from the example config; flip the
-# WebSocket endpoint to ws://localhost:8765/ticks so the bundled WS
-# simulator can feed the MarketTicks table)
+# Terminal 2 — vortex-server (the bundled example is pre-wired to point at
+# the bundled brokers and the WS simulator's local endpoint — no edits needed)
 cp config.example.json config.json
-$EDITOR config.json
 cargo run -p vortex-server -- --config config.json
 
 # Terminal 3 — WebSocket simulator (vortex-server connects to it)
@@ -572,9 +559,8 @@ cargo run -p vortex-server -- --config config.json
 .\scripts\solace.ps1 start
 .\scripts\nats.ps1 start
 
-# Terminal 2
+# Terminal 2 — example config is pre-wired to the bundled brokers + WS sim
 Copy-Item config.example.json config.json
-notepad config.json     # flip the WS endpoint to ws://localhost:8765/ticks
 cargo run -p vortex-server -- --config config.json
 
 # Terminal 3

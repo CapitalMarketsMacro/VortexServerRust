@@ -59,7 +59,7 @@
       "index": "tickId",
       "source": {
         "transport": "websocket",
-        "endpoint": "wss://feed.example.com/ticks",
+        "endpoint": "ws://localhost:8765/ticks",
         "subprotocols": [],
         "format": "json_row"
       }
