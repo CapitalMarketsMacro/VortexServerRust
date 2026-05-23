@@ -1,0 +1,16 @@
+{
+  "name": "vortex-sim-websocket",
+  "version": "0.1.0",
+  "description": "WebSocket server simulator (vortex-server connects out to it as a client).",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
