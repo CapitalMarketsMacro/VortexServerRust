@@ -13,10 +13,23 @@ name = "vortex-server"
 version = "0.1.0"
 edition = "2024"
 publish = false
+build = "build.rs"
 
 [[bin]]
 name = "vortex-server"
 path = "src/main.rs"
+
+[features]
+default = ["solace"]
+# Solace PubSub+ ingress (libsolclient via FFI). Enabled by default, but the
+# native `solace-rs` / `solace-rs-sys` deps are target-gated to non-Windows
+# below: the solace-rs-sys build script hard-panics on Windows, so there is no
+# way to compile them there. build.rs only emits the `solace_enabled` cfg when
+# this feature is on AND we are not on Windows; the ingress code keys off that
+# cfg, so a Windows build silently compiles Solace out and skips Solace-sourced
+# tables at runtime with a clear log line. Linux/macOS get Solace via plain
+# `cargo build`; pass `--no-default-features` there to opt out.
+solace = ["dep:solace-rs", "dep:solace-rs-sys"]
 
 [dependencies]
 # Perspective engine
@@ -49,14 +62,6 @@ futures = "0.3"
 # WebSocket client (for Websocket-sourced tables)
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 
-# Solace PubSub+ (libsolclient via FFI; build.rs auto-downloads the C tarball
-# unless SOLCLIENT_LIB_PATH or SOLCLIENT_TARBALL_URL is set). The -sys crate
-# is also pulled in directly so we can call solClient_msg_getBinaryAttachmentString
-# for SDT-STRING-wrapped payloads (e.g. from Solace's REST gateway), which the
-# high-level wrapper doesn't expose yet.
-solace-rs = "0.8"
-solace-rs-sys = "1.1"
-
 [profile.dev]
 panic = "abort"
 opt-level = "s"
@@ -67,6 +72,20 @@ opt-level = "z"
 codegen-units = 1
 lto = true
 strip = true
+
+# Solace PubSub+ (libsolclient via FFI; build.rs auto-downloads the C tarball
+# unless SOLCLIENT_LIB_PATH or SOLCLIENT_TARBALL_URL is set). The -sys crate is
+# pulled in directly so we can call solClient_msg_getBinaryAttachmentString for
+# SDT-STRING-wrapped payloads (e.g. from Solace's REST gateway), which the
+# high-level wrapper doesn't expose yet.
+#
+# Target-gated to non-Windows: solace-rs-sys 1.1's build script does
+# `panic!("Windows currently not supported")`, so these cannot build on
+# Windows. The `solace` feature references them via `dep:`; on Windows the
+# deps simply don't exist and the feature resolves to a no-op.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+solace-rs = { version = "0.8", optional = true }
+solace-rs-sys = { version = "1.1", optional = true }
 
 [patch.crates-io]
 protobuf-src = { git = "https://github.com/carlocorradini/rust-protobuf-native.git", rev = "1aba500e469f8bdc384a0fe9e69c189fda72e059" }
