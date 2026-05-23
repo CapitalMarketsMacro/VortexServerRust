@@ -16,7 +16,7 @@ use perspective::client::Table;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{NatsConfig, PayloadFormat, TableSource};
+use crate::config::{ConnectRetryConfig, NatsConfig, PayloadFormat, TableSource};
 use crate::ingress::apply;
 use crate::supervisor::supervise;
 use crate::tables::TableSlot;
@@ -33,6 +33,10 @@ const FIRST_MESSAGE_WARN_AFTER: Duration = Duration::from_secs(60);
 pub struct NatsContext {
     client: Client,
     jetstream: jetstream::Context,
+    /// Retry policy reused for JetStream stream/consumer acquisition so a
+    /// table whose stream isn't provisioned yet at startup keeps trying
+    /// instead of giving up (same backoff used for the initial connect).
+    connect_retry: ConnectRetryConfig,
 }
 
 /// Connect to NATS with exponential-backoff retry. Honors
@@ -73,7 +77,11 @@ pub async fn connect(
                     "NATS connection established"
                 );
                 let jetstream = jetstream::new(client.clone());
-                return Ok(NatsContext { client, jetstream });
+                return Ok(NatsContext {
+                    client,
+                    jetstream,
+                    connect_retry: cfg.connect_retry.clone(),
+                });
             }
             Err(error) => {
                 if !retry.is_unlimited() && attempt >= retry.max_attempts {
@@ -180,24 +188,22 @@ async fn run_table(
             consumer: consumer_name,
             ..
         } => {
-            let js_stream = ctx
-                .jetstream
-                .get_stream(&stream)
-                .await
-                .with_context(|| format!("stream '{stream}' not found"))?;
-
-            let consumer_cfg = consumer::pull::Config {
-                durable_name: Some(consumer_name.clone()),
-                filter_subject: subject.clone(),
-                ..Default::default()
+            // The stream may not exist yet at startup (fresh broker, or a
+            // publisher that creates the stream on first publish). Retry with
+            // backoff instead of giving up — a Solace/WS table being slow to
+            // provision must not permanently kill the Orders table.
+            let Some(consumer) = acquire_jetstream_consumer(
+                &ctx,
+                &stream,
+                &subject,
+                &consumer_name,
+                &slot.name,
+                &shutdown,
+            )
+            .await?
+            else {
+                return Ok(()); // shutdown during retry
             };
-
-            let consumer = js_stream
-                .get_or_create_consumer(&consumer_name, consumer_cfg)
-                .await
-                .with_context(|| {
-                    format!("failed to create consumer '{consumer_name}' on stream '{stream}'")
-                })?;
 
             let mut messages = consumer.messages().await?;
 
@@ -238,6 +244,92 @@ async fn run_table(
     }
 
     Ok(())
+}
+
+/// Acquire a JetStream pull consumer, retrying transient failures — most
+/// importantly the stream not existing yet (a freshly-booted broker, or a
+/// publisher that creates the stream lazily on first publish). Uses the same
+/// exponential backoff as the initial connect, so a table whose stream isn't
+/// provisioned at startup keeps trying instead of silently dying. Returns
+/// `Ok(None)` on shutdown, or `Err` only after exhausting `max_attempts`.
+async fn acquire_jetstream_consumer(
+    ctx: &NatsContext,
+    stream: &str,
+    subject: &str,
+    consumer_name: &str,
+    table_name: &str,
+    shutdown: &CancellationToken,
+) -> anyhow::Result<Option<consumer::Consumer<consumer::pull::Config>>> {
+    let retry = &ctx.connect_retry;
+    let mut backoff = retry.initial_backoff();
+    let max_backoff = retry.max_backoff();
+    let mut attempt: u32 = 0;
+
+    loop {
+        attempt += 1;
+        let label = retry.format_attempt(attempt);
+
+        match try_get_jetstream_consumer(ctx, stream, subject, consumer_name).await {
+            Ok(consumer) => {
+                tracing::info!(
+                    table = %table_name,
+                    stream = %stream,
+                    attempt = %label,
+                    "JetStream consumer ready"
+                );
+                return Ok(Some(consumer));
+            }
+            Err(error) => {
+                if !retry.is_unlimited() && attempt >= retry.max_attempts {
+                    return Err(anyhow!(
+                        "JetStream stream/consumer for table '{table_name}' unavailable after \
+                         {} attempts: {error}",
+                        retry.max_attempts
+                    ));
+                }
+                tracing::warn!(
+                    table = %table_name,
+                    stream = %stream,
+                    attempt = %label,
+                    %error,
+                    retry_in = ?backoff,
+                    "JetStream stream/consumer not ready yet, will retry"
+                );
+            }
+        }
+
+        tokio::select! {
+            _ = sleep(backoff) => {}
+            _ = shutdown.cancelled() => return Ok(None),
+        }
+
+        backoff = (backoff * 2).min(max_backoff);
+    }
+}
+
+/// One attempt to bind the stream and get-or-create the durable consumer.
+async fn try_get_jetstream_consumer(
+    ctx: &NatsContext,
+    stream: &str,
+    subject: &str,
+    consumer_name: &str,
+) -> anyhow::Result<consumer::Consumer<consumer::pull::Config>> {
+    let js_stream = ctx
+        .jetstream
+        .get_stream(stream)
+        .await
+        .with_context(|| format!("stream '{stream}' not found"))?;
+
+    let consumer_cfg = consumer::pull::Config {
+        durable_name: Some(consumer_name.to_string()),
+        filter_subject: subject.to_string(),
+        ..Default::default()
+    };
+
+    js_stream
+        .get_or_create_consumer(consumer_name, consumer_cfg)
+        .await
+        .with_context(|| format!("failed to create consumer '{consumer_name}' on stream '{stream}'"))
 }
 
 /// Await the first NATS core message, periodically logging "still waiting"
