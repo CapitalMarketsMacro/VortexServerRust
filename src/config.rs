@@ -146,13 +146,13 @@ impl ConnectRetryConfig {
     }
 }
 
-/// Solace PubSub+ broker connection settings. Currently scaffolded; the actual
-/// SMF client binding is not yet wired up — startup fails fast if any table
-/// uses the `solace` transport.
+/// Solace PubSub+ broker connection settings. Used for direct topic
+/// subscription ingress (one libsolclient session per Solace-sourced table,
+/// for per-table isolation matching the rest of vortex-server).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolaceConfig {
     /// Solace broker URL, e.g. "tcps://broker.example.com:55443" or
-    /// "tcp://localhost:55555".
+    /// "tcp://localhost:55554". Use the `tcps://` scheme to opt into TLS.
     pub host: String,
     /// Message VPN name.
     #[serde(default = "default_solace_vpn")]
@@ -161,6 +161,10 @@ pub struct SolaceConfig {
     pub password: String,
     #[serde(default = "default_solace_client_name")]
     pub client_name: String,
+    /// Initial connect retry policy. Applies per-table at session-build
+    /// time; libsolclient handles steady-state reconnect internally.
+    #[serde(default)]
+    pub connect_retry: ConnectRetryConfig,
 }
 
 fn default_solace_vpn() -> String {
