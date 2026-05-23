@@ -94,6 +94,12 @@ services:
       retries: 6
       start_period: 10s
 
+# Explicit volume names so they do NOT inherit the Compose project prefix
+# (which is derived from the checkout directory name and therefore varies
+# between machines). Pinning them keeps `nats.ps1 stop --wipe` and the
+# equivalent shell script able to find and remove the volume on any host.
 volumes:
   solace-storage:
+    name: vortex-solace-storage
   nats-storage:
+    name: vortex-nats-storage
