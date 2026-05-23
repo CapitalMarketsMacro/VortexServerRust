@@ -160,10 +160,12 @@ cargo run -p vortex-server -- --config config.example.json
 ./scripts/sim-ws-py.sh                     # MarketTicks (point vortex at ws://localhost:8765/ticks)
 ```
 
-The bundled `config.example.json` points the WebSocket-sourced
-`MarketTicks` table at `wss://feed.example.com/ticks` for illustration —
-flip it to `ws://localhost:8765/ticks` to consume from the bundled WS
-simulator.
+`config.example.json` is pre-wired to all of the bundled local
+endpoints — the WebSocket-sourced `MarketTicks` table already points at
+`ws://localhost:8765/ticks` to match the WS simulator, the NATS-sourced
+tables at `nats://localhost:4222`, and the Solace-sourced table at
+`tcp://localhost:55554`. Copy it to `config.json` and run vortex-server
+unmodified.
 
 ## What's intentionally minimal
 
