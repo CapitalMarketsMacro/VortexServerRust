@@ -1,0 +1,13 @@
+{
+  "name": "vortex-sim-solace",
+  "version": "0.1.0",
+  "description": "Solace REST messaging publisher simulator for vortex-server.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node publisher.js"
+  }
+}

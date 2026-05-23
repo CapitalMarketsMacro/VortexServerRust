@@ -1,0 +1,17 @@
+{
+  "name": "vortex-sim-nats",
+  "version": "0.1.0",
+  "description": "NATS publisher simulator for vortex-server (Core + JetStream).",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node publisher.js",
+    "start:jetstream": "node publisher.js --mode=jetstream"
+  },
+  "dependencies": {
+    "nats": "^2.29.0"
+  }
+}

@@ -17,3 +17,11 @@ logs/
 # Conan download cache metadata (only the tarball is needed)
 vendor/conan-sources/locks/
 vendor/conan-sources/s/
+
+# Simulator runtime artefacts — each simulator stages its own venv /
+# node_modules on first run; we never commit them.
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+package-lock.json
