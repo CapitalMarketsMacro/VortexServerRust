@@ -42,9 +42,11 @@ services:
       - solace-storage:/var/lib/solace
     restart: unless-stopped
     healthcheck:
-      # SEMP __about/api returns 200 only when the management plane is up
-      # AND the messaging plane is ready to accept clients. Auth is required.
-      test: ["CMD-SHELL", "curl -sfu admin:admin http://localhost:8080/SEMP/v2/__about/api >/dev/null"]
+      # Probing the default Message VPN via SEMP confirms both that the
+      # management plane is up AND that the messaging plane has provisioned
+      # the VPN clients will connect to. (/SEMP/v2/__about returns 400; the
+      # monitor/msgVpns endpoint is the meaningful "ready for traffic" check.)
+      test: ["CMD-SHELL", "curl -sfu admin:admin http://localhost:8080/SEMP/v2/monitor/msgVpns/default >/dev/null"]
       interval: 10s
       timeout: 3s
       retries: 12

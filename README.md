@@ -286,21 +286,75 @@ cargo clippy
 
 ## Local Solace broker
 
-A `docker-compose.yml` is included for spinning up a single-node Solace
-broker for development against the Solace ingress:
+A `docker-compose.yml` and a pair of cross-platform helper scripts
+(`scripts/solace.sh` for macOS/Linux, `scripts/solace.ps1` for Windows)
+are included for running a single-node Solace PubSub+ broker locally.
+The scripts share one command surface: `start`, `stop`, `status`, `logs`,
+`restart`.
+
+### 1. Install Docker
+
+Docker Desktop ships both `docker` and `docker compose` v2; Linux users
+who prefer the engine-only install also need the compose plugin. The
+broker image is ~1.5 GB, so allow some disk and memory headroom (we
+recommend at least 4 GB RAM dedicated to Docker).
+
+| OS | Install path | Verify |
+|---|---|---|
+| **macOS** (Intel or Apple Silicon) | Download Docker Desktop from <https://www.docker.com/products/docker-desktop/>, drag `Docker.app` to `/Applications`, launch it, accept the EULA. Wait for the whale icon in the menu bar to stop animating. | `docker version && docker compose version` |
+| **Windows 10 / 11** (x86_64) | Download Docker Desktop from <https://www.docker.com/products/docker-desktop/>. The installer enables the WSL2 backend automatically — accept all defaults. Reboot when prompted. | In PowerShell: `docker version; docker compose version` |
+| **Linux** (Debian/Ubuntu) | Easiest: `curl -fsSL https://get.docker.com \| sh`, then `sudo usermod -aG docker $USER` and log out/in. Or follow the distro-specific instructions at <https://docs.docker.com/engine/install/>. Make sure `docker-compose-plugin` (or `docker-ce-cli`'s built-in `compose` subcommand) is present. | `docker version && docker compose version` |
+
+The scripts refuse to run if Docker isn't installed or the daemon isn't
+reachable, so it's safe to run them before you've got everything
+configured.
+
+### 2. Start the broker
 
 ```bash
-docker compose up -d solace          # ~30s to ready
-docker compose logs -f solace        # tail logs
-docker compose down -v               # stop and wipe state
+# macOS / Linux
+./scripts/solace.sh start
+
+# Windows (PowerShell)
+.\scripts\solace.ps1 start
 ```
 
-Once it's up, the PubSub+ Manager web UI is at <http://localhost:8080>
-(admin / admin). The SMF endpoint vortex-server connects to is
-`tcp://localhost:55554` — port 55555 inside the container is remapped
-because macOS reserves 55555 host-side. The bundled compose file also
-exposes port 9000 (REST messaging), which makes ad-hoc publishes a
-one-liner from the host:
+First start takes 30–90 seconds: Docker pulls
+`solace/solace-pubsub-standard` (~1.5 GB once), then waits for the
+broker's SEMP healthcheck to flip to ready. Subsequent starts are
+~10 seconds. When the script returns, it prints the live endpoints.
+
+### 3. Operate it
+
+| Action | macOS / Linux | Windows |
+|---|---|---|
+| State + endpoints | `./scripts/solace.sh status` | `.\scripts\solace.ps1 status` |
+| Tail logs | `./scripts/solace.sh logs` | `.\scripts\solace.ps1 logs` |
+| Stop (keep state) | `./scripts/solace.sh stop` | `.\scripts\solace.ps1 stop` |
+| Stop AND wipe state | `./scripts/solace.sh stop --wipe` | `.\scripts\solace.ps1 stop -Wipe` |
+| Restart | `./scripts/solace.sh restart` | `.\scripts\solace.ps1 restart` |
+
+Persisted state lives in the `vortexserverrust_solace-storage` Docker
+volume — `stop` preserves it (queues, configuration, message backlog),
+`stop --wipe` deletes the whole volume.
+
+### 4. Use it
+
+Endpoints exposed on `localhost`:
+
+- **SMF** `tcp://localhost:55554` — what `vortex-server`'s Solace
+  ingress connects to (port 55555 inside the container is remapped
+  because macOS reserves 55555 host-side, and we keep the same mapping
+  everywhere for parity)
+- **SMF/TLS** `tcps://localhost:55443`
+- **REST messaging** `http://localhost:9000` — one-shot publishes via
+  `curl`
+- **PubSub+ Manager (web UI)** <http://localhost:8080> — login
+  `admin` / `admin`
+
+Once the broker is up, `cargo run -p vortex-server` will pick up the
+Solace block in `config.json` and start subscribing. To publish a test
+message from the host:
 
 ```bash
 curl -u default: -H 'Content-Type: application/json' \
