@@ -136,6 +136,7 @@ Conan install → CMake configure → compile → link. Key details:
 ### Solace (`solace-rs` / `solace-rs-sys` build.rs)
 
 - On first build, downloads a pinned `libsolclient` tarball (v7.26.1.8) for the active platform from `github.com/asimsedhain/solace-rs/releases`. ~30 MB. Override with `SOLCLIENT_TARBALL_URL=...` or `SOLCLIENT_LIB_PATH=/path/to/lib` to use a local copy.
+- **Offline / enterprise builds:** the Linux x86_64 libs are vendored in `vendor/solclient/` and wired up via `.cargo/config.toml` (`SOLCLIENT_LIB_PATH`, repo-root-relative), so `cargo build` never hits the network for them. See `vendor/solclient/README.md`. This applies to Linux x86_64 only — on macOS / Windows / musl, unset the var (`SOLCLIENT_LIB_PATH= cargo build`) so the correct platform tarball downloads, or vendor that platform's libs the same way.
 - macOS additionally links `dylib=gssapi_krb5` (system Kerberos).
 - Windows uses `Win64/` subdirectory with static libs `libsolclient_s`, `libcrypto_s`, `libssl_s` (no gssapi).
 - Linux/macOS use static libs `solclient`, `solclientssl`, `ssl`, `crypto`.
