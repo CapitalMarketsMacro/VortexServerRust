@@ -31,8 +31,12 @@ fork into a custom data shape.
 |---|---|---|---|
 | Python 3 | NATS, Solace, WebSocket simulators (Python) | All `python/` sims | 3.10+ |
 | Node.js | NATS, Solace, WebSocket simulators (Node) | All `nodejs/` sims | 18 (for built-in `fetch`) |
-| Docker  | Solace broker for the Solace sim | Solace path only | Docker Desktop or Engine |
-| A NATS broker | NATS sims need somewhere to publish to | NATS path only | `nats-server` or container |
+| Docker  | Solace + NATS brokers used by the matching sims | Solace + NATS paths | Docker Desktop or Engine |
+
+The NATS and Solace brokers needed by the corresponding simulators are
+both bundled in the repo's `docker-compose.yml` and managed by the
+`scripts/nats.{sh,ps1}` and `scripts/solace.{sh,ps1}` helpers — see the
+top-level README for setup.
 
 Dependencies are installed automatically on first run of each script
 into a per-simulator `.venv/` (Python) or `node_modules/` (Node). Both
@@ -142,9 +146,9 @@ nested arrays stringified by vortex):
 ## End-to-end demo
 
 ```bash
-# 1. Brokers
-./scripts/solace.sh start            # Solace via docker compose
-nats-server -js &                    # NATS with JetStream (install via Homebrew, apt, etc.)
+# 1. Brokers (both bundled via docker-compose)
+./scripts/solace.sh start            # ~60s to healthy
+./scripts/nats.sh start              # ~5s
 
 # 2. vortex-server (in another terminal)
 cargo run -p vortex-server -- --config config.example.json

@@ -169,13 +169,16 @@ Conan + CMake on first invocation via build.rs.
 
 ## Local Testing Infrastructure
 
-Two operational layers sit at the repo root:
+Two operational layers sit at the repo root.
 
-**Solace broker (Docker)** — `docker-compose.yml` plus `scripts/solace.{sh,ps1}` (start/stop/status/logs/restart). Read `README.md` § Local Solace broker for the full user flow; key implementation notes are in the script source. The compose's `nofile` hard limit must stay at `1048576` (Solace POST violation 022 otherwise crashloops the broker) and the healthcheck uses `/SEMP/v2/monitor/msgVpns/default` (the more obvious `/__about/api` returns HTTP 400 unconditionally).
+**Brokers (Docker)** — `docker-compose.yml` defines two independent services:
+
+- `solace` (solace/solace-pubsub-standard) managed by `scripts/solace.{sh,ps1}`. Implementation gotchas: `nofile` hard limit must stay at `1048576` (Solace POST violation 022 otherwise crashloops the broker) and the healthcheck uses `/SEMP/v2/monitor/msgVpns/default` (the more obvious `/__about/api` returns HTTP 400 unconditionally).
+- `nats` (nats:alpine, JetStream enabled with persistent storage) managed by `scripts/nats.{sh,ps1}`. Uses alpine specifically because the default `nats:latest` is a scratch image with the binary only — alpine ships busybox-wget so the `/healthz` healthcheck works. Both scripts share the same surface: `start | stop [--wipe] | status | logs | restart`.
 
 **Simulators** — `simulators/{nats,solace,websocket}/{python,nodejs}/` with paired-implementation publishers (or a WS server for the websocket case). Each is run via `scripts/sim-<transport>-<lang>.{sh,ps1}` which lazily creates `.venv/` (Python) or `node_modules/` (Node). Schemas match `config.example.json` so rows are immediately viewable in Perspective. See `simulators/README.md` for the full table.
 
-When debugging an ingress problem, the workflow is: bring up the broker → run vortex-server with the affected table → run the matching simulator → watch `vortex-server` logs for `seeded` / `apply` activity.
+When debugging an ingress problem, the workflow is: bring up the matching broker → run vortex-server with the affected table → run the matching simulator → watch `vortex-server` logs for `seeded` / `apply` activity. The NATS JetStream simulators auto-create the `ORDERS` stream on first publish so they bootstrap a brand-new broker without manual setup.
 
 ## Feature Flags
 
@@ -212,15 +215,16 @@ What's been validated end-to-end vs. what's pending:
 | `cargo build` (incl. C++ + libsolclient) | ✅ verified | inherited from arm64 | inherited (CI) | **needs verification** |
 | Solace ingress end-to-end | ✅ verified (500-msg burst) | — | — | **needs verification** |
 | `scripts/solace.{sh,ps1}` (broker mgmt) | ✅ verified (bash) | — | — | **`.ps1` not yet validated** |
+| `scripts/nats.{sh,ps1}` (broker mgmt) | ✅ verified (bash) | — | — | **`.ps1` not yet validated** |
 | `scripts/sim-solace-*.{sh,ps1}` | ✅ verified (Python + Node) | — | — | **`.ps1` not yet validated** |
+| `scripts/sim-nats-*.{sh,ps1}` | ✅ verified (Python + Node, Core + JetStream) | — | — | **`.ps1` not yet validated** |
 | `scripts/sim-ws-*.{sh,ps1}` | ✅ verified (Python + Node) | — | — | **`.ps1` not yet validated** |
-| `scripts/sim-nats-*.{sh,ps1}` | startup only (no NATS broker available) | — | — | **needs NATS + verification** |
 
 When testing on Windows, the high-confidence path is:
 1. `cargo build -p vortex-server` — verifies the libsolclient Windows tarball + `Win64/` static-link path works
-2. `.\scripts\solace.ps1 start` — verifies Docker Desktop + the broker management script
+2. `.\scripts\solace.ps1 start` and `.\scripts\nats.ps1 start` — verifies Docker Desktop + both broker management scripts
 3. `.\scripts\sim-solace-py.ps1 --count=10` and `.\scripts\sim-solace-js.ps1 --count=10` — verifies the Python venv and Node `fetch` paths work
-4. `.\scripts\sim-ws-py.ps1` (and `sim-ws-js.ps1`) in one window + a quick browser/curl connect to verify the WS server
-5. NATS only if a NATS broker (e.g. `nats:latest` via docker) is available — not currently in docker-compose
+4. `.\scripts\sim-nats-py.ps1 --count=10` and `.\scripts\sim-nats-js.ps1 --count=10` (then re-run with `--mode=jetstream`) — verifies the four NATS sim paths against the bundled broker
+5. `.\scripts\sim-ws-py.ps1` (and `sim-ws-js.ps1`) in one window + a quick browser/curl connect to verify the WS server
 
 The `.ps1` scripts are direct mirrors of the validated `.sh` scripts; expect the bugs surfaced on Windows to be PowerShell-syntax or path-separator quirks rather than logic issues.
