@@ -16,6 +16,7 @@ use crate::tables::TableRegistry;
 use crate::transform::RowTransform;
 
 mod nats;
+#[cfg(solace_enabled)]
 mod solace;
 mod websocket;
 
@@ -46,6 +47,7 @@ pub async fn spawn_consumers(
             TableSource::NatsCore { .. } | TableSource::NatsJetstream { .. }
         )
     });
+    #[cfg(solace_enabled)]
     let needs_solace = bound_slots
         .iter()
         .any(|s| matches!(s.config.source.as_ref().unwrap(), TableSource::Solace { .. }));
@@ -78,6 +80,8 @@ pub async fn spawn_consumers(
 
     // Solace context (libsolclient init only — no network I/O here).
     // Per-table tasks open their own session inside the supervisor loop.
+    // Only built when Solace support is compiled in (see build.rs).
+    #[cfg(solace_enabled)]
     let solace_ctx = if needs_solace {
         match config.transports.solace.as_ref() {
             None => {
@@ -127,14 +131,27 @@ pub async fn spawn_consumers(
                 nats::start(ctx, slot, transform, shutdown.clone());
             }
             TableSource::Solace { .. } => {
-                let Some(ctx) = solace_ctx.clone() else {
-                    tracing::warn!(
+                #[cfg(solace_enabled)]
+                {
+                    let Some(ctx) = solace_ctx.clone() else {
+                        tracing::warn!(
+                            table = %slot.name,
+                            "skipping table — Solace transport is unavailable"
+                        );
+                        continue;
+                    };
+                    solace::start(ctx, slot, transform, shutdown.clone());
+                }
+                #[cfg(not(solace_enabled))]
+                {
+                    tracing::error!(
                         table = %slot.name,
-                        "skipping table — Solace transport is unavailable"
+                        "table is Solace-sourced but this build has no Solace support \
+                         (the solace-rs-sys crate does not build on Windows); skipping. \
+                         Use a Linux/macOS build for Solace ingress."
                     );
                     continue;
-                };
-                solace::start(ctx, slot, transform, shutdown.clone());
+                }
             }
             TableSource::Websocket { .. } => {
                 websocket::start(slot, transform, shutdown.clone());

@@ -25,3 +25,5 @@ __pycache__/
 *.pyc
 node_modules/
 package-lock.json
+*.iml
+.idea/perspective-native.iml
