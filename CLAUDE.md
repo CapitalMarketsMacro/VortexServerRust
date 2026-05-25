@@ -133,6 +133,40 @@ Conan install → CMake configure → compile → link. Key details:
 - Protoc discovery order: Conan output → `PROTOC` env var → bundled `protobuf-src` → system PATH
 - Windows-specific links from the C++ side: `ole32, shell32, advapi32, bcrypt, ws2_32, crypt32, userenv`
 
+### Corporate networks: Conan TLS trust & pre-built binaries
+
+In a corporate environment, **prefer downloading pre-built Conan binaries over
+compiling from source** — source archives are often blocked or slow, and Arrow
+is by far the biggest source build. Two things gate this:
+
+**1. Conan must trust the corporate TLS root.** On a TLS-intercepting network
+(e.g. Norton Web/Mail Shield, Zscaler), `conan install` fails against
+`center2.conan.io` with `CERTIFICATE_VERIFY_FAILED ... unable to get local
+issuer certificate`, so it can download *nothing* and falls back to the local
+`~/.conan2` cache (compiling anything not already cached). Conan uses
+python-requests, so point it at a CA bundle that includes the corporate root —
+e.g. export the Windows Trusted Root store to a PEM, then:
+
+```powershell
+setx CONAN_CACERT_PATH C:\path\corp-roots.pem
+# or add to ~/.conan2/global.conf:  core.net.http:cacert_path=C:/path/corp-roots.pem
+# (REQUESTS_CA_BUNDLE also works)
+```
+
+A normal *incremental* `cargo build` is unaffected (deps are cached); this only
+bites a clean/fresh build (e.g. `cargo clippy` on a fresh checkout).
+
+**2. Arrow currently builds from source by design.** `conanfile.py`'s
+`configure()` sets `arrow.parquet=False` + `arrow.with_thrift=False`. ConanCenter's
+Arrow recipe **defaults** are `parquet=True` / `with_thrift=True`, so our options
+produce a package_id ConanCenter never pre-built → `--build=missing` compiles
+Arrow from source. This is a **deliberate corporate-env workaround**: it lets
+Arrow build *without* pulling thrift from `archive.apache.org` (a commonly-blocked
+source URL). To switch to a pre-built Arrow, first fix (1), then match the recipe
+defaults and verify a binary exists with `conan install ... --build=never` (NOT
+`=missing`) — only flip the override off if that download succeeds, otherwise a
+default-options source fallback would hit the blocked thrift download.
+
 ### Solace (`solace-rs` / `solace-rs-sys` build.rs)
 
 - On first build, downloads a pinned `libsolclient` tarball (v7.26.1.8) for the active platform from `github.com/asimsedhain/solace-rs/releases`. ~30 MB. Override with `SOLCLIENT_TARBALL_URL=...` or `SOLCLIENT_LIB_PATH=/path/to/lib` to use a local copy.
