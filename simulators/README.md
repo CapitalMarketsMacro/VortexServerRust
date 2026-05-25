@@ -80,6 +80,32 @@ point.
 .\scripts\sim-ws-js.ps1
 ```
 
+#### Windows: `npm install` fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`
+
+If the **Node** simulators fail on first run while installing deps with
+`npm error ... unable to verify the first certificate`, your machine is
+behind a TLS-intercepting proxy or endpoint-security product (e.g. Norton
+Web/Mail Shield, Zscaler) that re-signs HTTPS with a private root CA. npm
+ships its own CA bundle and doesn't trust that root, so the registry fetch
+fails. (Python sims are unaffected — pip uses the Windows cert store.)
+
+Node 22.15+ can use the Windows trust store directly — set this for the
+shell that runs the first install:
+
+```powershell
+$env:NODE_OPTIONS = '--use-system-ca'
+.\scripts\sim-nats-js.ps1 --count=10   # installs deps using the OS CA store
+```
+
+Once `node_modules/` exists, the env var is no longer needed (the sims
+only talk to local brokers, which aren't intercepted). On older Node, set
+`NODE_EXTRA_CA_CERTS` to a PEM containing your corporate root instead.
+
+The same TLS interception also blocks **Conan** (`center2.conan.io` →
+`CERTIFICATE_VERIFY_FAILED`) when building the C++ engine — see the "Corporate
+networks: Conan TLS trust & pre-built binaries" section in `CLAUDE.md` for the
+`CONAN_CACERT_PATH` fix. (Python sims are unaffected; pip uses the Windows store.)
+
 ## Common flags
 
 The same flags work on every simulator (Python and Node) — the Node

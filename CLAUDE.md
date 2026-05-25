@@ -133,13 +133,47 @@ Conan install → CMake configure → compile → link. Key details:
 - Protoc discovery order: Conan output → `PROTOC` env var → bundled `protobuf-src` → system PATH
 - Windows-specific links from the C++ side: `ole32, shell32, advapi32, bcrypt, ws2_32, crypt32, userenv`
 
+### Corporate networks: Conan TLS trust & pre-built binaries
+
+In a corporate environment, **prefer downloading pre-built Conan binaries over
+compiling from source** — source archives are often blocked or slow, and Arrow
+is by far the biggest source build. Two things gate this:
+
+**1. Conan must trust the corporate TLS root.** On a TLS-intercepting network
+(e.g. Norton Web/Mail Shield, Zscaler), `conan install` fails against
+`center2.conan.io` with `CERTIFICATE_VERIFY_FAILED ... unable to get local
+issuer certificate`, so it can download *nothing* and falls back to the local
+`~/.conan2` cache (compiling anything not already cached). Conan uses
+python-requests, so point it at a CA bundle that includes the corporate root —
+e.g. export the Windows Trusted Root store to a PEM, then:
+
+```powershell
+setx CONAN_CACERT_PATH C:\path\corp-roots.pem
+# or add to ~/.conan2/global.conf:  core.net.http:cacert_path=C:/path/corp-roots.pem
+# (REQUESTS_CA_BUNDLE also works)
+```
+
+A normal *incremental* `cargo build` is unaffected (deps are cached); this only
+bites a clean/fresh build (e.g. `cargo clippy` on a fresh checkout).
+
+**2. Arrow currently builds from source by design.** `conanfile.py`'s
+`configure()` sets `arrow.parquet=False` + `arrow.with_thrift=False`. ConanCenter's
+Arrow recipe **defaults** are `parquet=True` / `with_thrift=True`, so our options
+produce a package_id ConanCenter never pre-built → `--build=missing` compiles
+Arrow from source. This is a **deliberate corporate-env workaround**: it lets
+Arrow build *without* pulling thrift from `archive.apache.org` (a commonly-blocked
+source URL). To switch to a pre-built Arrow, first fix (1), then match the recipe
+defaults and verify a binary exists with `conan install ... --build=never` (NOT
+`=missing`) — only flip the override off if that download succeeds, otherwise a
+default-options source fallback would hit the blocked thrift download.
+
 ### Solace (`solace-rs` / `solace-rs-sys` build.rs)
 
 - On first build, downloads a pinned `libsolclient` tarball (v7.26.1.8) for the active platform from `github.com/asimsedhain/solace-rs/releases`. ~30 MB. Override with `SOLCLIENT_TARBALL_URL=...` or `SOLCLIENT_LIB_PATH=/path/to/lib` to use a local copy.
 - **Offline / enterprise builds:** the Linux x86_64 libs are vendored in `vendor/solclient/` and wired up via `.cargo/config.toml` (`SOLCLIENT_LIB_PATH`, repo-root-relative), so `cargo build` never hits the network for them. See `vendor/solclient/README.md`. This applies to Linux x86_64 only — on macOS / Windows / musl, unset the var (`SOLCLIENT_LIB_PATH= cargo build`) so the correct platform tarball downloads, or vendor that platform's libs the same way.
 - macOS additionally links `dylib=gssapi_krb5` (system Kerberos).
-- Windows uses `Win64/` subdirectory with static libs `libsolclient_s`, `libcrypto_s`, `libssl_s` (no gssapi).
 - Linux/macOS use static libs `solclient`, `solclientssl`, `ssl`, `crypto`.
+- **Windows is not supported by `solace-rs-sys` 1.1** — its `build.rs` does `panic!("Windows currently not supported")` (despite defining a Windows tarball name it never uses). We therefore **target-gate the `solace-rs` / `solace-rs-sys` deps out of Windows** in the root `Cargo.toml` and gate the Solace ingress behind the `solace` feature (see below). On Windows, Solace-sourced tables are skipped at runtime with a clear error log; NATS + WebSocket work normally. A real Windows port would mean vendoring/patching `solace-rs-sys` to consume the existing `solclient_Win_vs2015_*.tar.gz` and adding the MSVC system libs — not done.
 
 ## Build Commands
 
@@ -185,6 +219,7 @@ When debugging an ingress problem, the workflow is: bring up the matching broker
 
 | Crate | Flag | Effect |
 |---|---|---|
+| `vortex-server` | `solace` | **Default-on.** Compiles in Solace ingress (`solace-rs` + `solace-rs-sys`). The deps are target-gated to non-Windows, and `build.rs` only emits the `solace_enabled` cfg when this feature is on AND the target isn't Windows — so on Windows the feature resolves to a no-op and Solace code is compiled out. Pass `--no-default-features` (Linux/macOS) to build without Solace. |
 | `perspective` | `axum-ws` | Enables Axum WebSocket server + Tokio |
 | `perspective` | `external-cpp` | Use externally-built C++ artifacts |
 | `perspective-server` | `disable-cpp` | Skip C++ entirely (headless mode) |
@@ -213,19 +248,31 @@ What's been validated end-to-end vs. what's pending:
 
 | Concern | macOS ARM64 | macOS x86_64 | Linux x86_64 | Windows x86_64 |
 |---|---|---|---|---|
-| `cargo build` (incl. C++ + libsolclient) | ✅ verified | inherited from arm64 | inherited (CI) | **needs verification** |
-| Solace ingress end-to-end | ✅ verified (500-msg burst) | — | — | **needs verification** |
-| `scripts/solace.{sh,ps1}` (broker mgmt) | ✅ verified (bash) | — | — | **`.ps1` not yet validated** |
-| `scripts/nats.{sh,ps1}` (broker mgmt) | ✅ verified (bash) | — | — | **`.ps1` not yet validated** |
-| `scripts/sim-solace-*.{sh,ps1}` | ✅ verified (Python + Node) | — | — | **`.ps1` not yet validated** |
-| `scripts/sim-nats-*.{sh,ps1}` | ✅ verified (Python + Node, Core + JetStream) | — | — | **`.ps1` not yet validated** |
-| `scripts/sim-ws-*.{sh,ps1}` | ✅ verified (Python + Node) | — | — | **`.ps1` not yet validated** |
+| `cargo build` (incl. C++) | ✅ verified | inherited from arm64 | inherited (CI) | ✅ verified (Solace gated out) |
+| Solace ingress end-to-end | ✅ verified (500-msg burst) | — | — | ⊘ N/A (`solace-rs-sys` won't build on Windows; compiled out) |
+| NATS Core ingress end-to-end | ✅ verified | — | — | ✅ verified (table seeded) |
+| NATS JetStream ingress end-to-end | ✅ verified | — | — | ✅ verified (stream-not-ready retry, then seeded) |
+| WebSocket ingress end-to-end | ✅ verified | — | — | ✅ verified (table seeded) |
+| Per-table WS serve (route upgrade) | ✅ verified | — | — | ✅ verified |
+| `scripts/solace.{sh,ps1}` (broker mgmt) | ✅ verified (bash) | — | — | ✅ `.ps1` validated (status/dispatch; broker bring-up N/A) |
+| `scripts/nats.{sh,ps1}` (broker mgmt) | ✅ verified (bash) | — | — | ✅ `.ps1` verified (start/status/stop --wipe) |
+| `scripts/sim-nats-*.{sh,ps1}` | ✅ verified (Python + Node, Core + JetStream) | — | — | ✅ `.ps1` verified (Python + Node, Core + JetStream) |
+| `scripts/sim-ws-*.{sh,ps1}` | ✅ verified (Python + Node) | — | — | ✅ `.ps1` verified (Python + Node) |
+| `scripts/sim-solace-*.{sh,ps1}` | ✅ verified (Python + Node) | — | — | ⊘ broker N/A on Windows (ingress compiled out) |
+
+Notes from the Windows bring-up (2026-05): Solace is compiled out (see the
+Solace build section); a missing JetStream stream at startup now retries
+with backoff instead of permanently killing the table; docker volume names
+are pinned (`vortex-nats-storage` / `vortex-solace-storage`) so they don't
+inherit the checkout-dir-derived Compose project prefix; the Python sim
+launchers use `python -m pip` (the `pip.exe` shim can't self-upgrade on
+Windows); and the **Node** sims need `npm install` to trust the OS cert
+store on TLS-intercepting networks — see `simulators/README.md`
+("`UNABLE_TO_VERIFY_LEAF_SIGNATURE`").
 
 When testing on Windows, the high-confidence path is:
-1. `cargo build -p vortex-server` — verifies the libsolclient Windows tarball + `Win64/` static-link path works
-2. `.\scripts\solace.ps1 start` and `.\scripts\nats.ps1 start` — verifies Docker Desktop + both broker management scripts
-3. `.\scripts\sim-solace-py.ps1 --count=10` and `.\scripts\sim-solace-js.ps1 --count=10` — verifies the Python venv and Node `fetch` paths work
-4. `.\scripts\sim-nats-py.ps1 --count=10` and `.\scripts\sim-nats-js.ps1 --count=10` (then re-run with `--mode=jetstream`) — verifies the four NATS sim paths against the bundled broker
-5. `.\scripts\sim-ws-py.ps1` (and `sim-ws-js.ps1`) in one window + a quick browser/curl connect to verify the WS server
-
-The `.ps1` scripts are direct mirrors of the validated `.sh` scripts; expect the bugs surfaced on Windows to be PowerShell-syntax or path-separator quirks rather than logic issues.
+1. `cargo build -p vortex-server` — builds the C++ engine + NATS/WS; Solace is target-gated out (verifies the `solace_enabled` cfg gating compiles cleanly with the deps absent)
+2. `.\scripts\nats.ps1 start` — verifies Docker Desktop + the NATS broker management script
+3. `.\scripts\sim-nats-py.ps1 --count=10` and `.\scripts\sim-nats-js.ps1 --count=10` (then re-run with `--mode=jetstream`) — verifies the four NATS sim paths against the bundled broker
+4. `.\scripts\sim-ws-py.ps1` (and `sim-ws-js.ps1`) in one window — verifies the WS server, which vortex-server connects to
+5. Run `cargo run -p vortex-server -- --config config.example.json` and watch for `table seeded` on RatesMarketData (NATS core), Orders (JetStream), MarketTicks (WebSocket); Executions (Solace) logs a skip

@@ -106,7 +106,7 @@ cmd_stop() {
     # Per-service down isn't supported, so stop+rm the container and
     # delete just the nats volume by name.
     docker compose rm -sf nats
-    docker volume rm vortexserverrust_nats-storage >/dev/null 2>&1 || true
+    docker volume rm vortex-nats-storage >/dev/null 2>&1 || true
   else
     echo "$(bold "==>") Stopping broker (JetStream data preserved in volume)..."
     docker compose stop nats
