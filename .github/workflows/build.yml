@@ -1,0 +1,124 @@
+# Build vortex-server on Linux x86_64 and Windows x86_64.
+#
+# First run on a fresh cache takes ~30-45 min because Conan compiles
+# Arrow 22 from source (we set with_thrift=False / parquet=False, which
+# deviates from the prebuilt binary on conancenter). Subsequent runs
+# hit the cached ~/.conan2 and the cached Cargo target dir, dropping
+# to ~5 min.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary: vortex-server
+          - label: windows-x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary: vortex-server.exe
+
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The vendored Linux x86_64 libsolclient in vendor/solclient/ is
+      # wired up via .cargo/config.toml's SOLCLIENT_LIB_PATH. On Windows
+      # that path obviously won't link — drop the file so solace-rs-sys
+      # falls back to downloading the Windows tarball from GitHub on its
+      # own (~12 MB, fetched once and then cached in ~/.cargo).
+      - name: Remove vendored-libsolclient cargo config (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Remove-Item -Force .cargo/config.toml
+
+      - name: Install Rust toolchain (nightly-2026-01-01)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-01-01
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy, rust-src
+
+      - name: Setup Python (for Conan)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Conan 2.x
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "conan>=2,<3"
+          conan --version
+
+      - name: Detect default Conan profile
+        shell: bash
+        run: conan profile detect --force
+
+      # Brings cl.exe, link.exe, etc. onto PATH and exports the MSVC
+      # environment vars (INCLUDE/LIB/LIBPATH) that CMake + cc-rs read.
+      - name: Setup MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Cargo + Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.label }}
+          cache-on-failure: true
+
+      - name: Conan package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-${{ matrix.label }}-${{ hashFiles('Vortex/crates/perspective-server/conanfile.py', 'Vortex/crates/perspective-server/conan/profiles/*') }}
+          restore-keys: |
+            conan-${{ matrix.label }}-
+
+      - name: Print build environment
+        shell: bash
+        run: |
+          echo "OS:      $RUNNER_OS"
+          echo "Runner:  ${{ matrix.os }}"
+          echo "Target:  ${{ matrix.target }}"
+          rustc --version
+          cargo --version
+          cmake --version | head -1
+          conan --version
+
+      - name: Build vortex-server (release)
+        shell: bash
+        run: cargo build --release -p vortex-server --target ${{ matrix.target }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: vortex-server-${{ matrix.label }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 14
