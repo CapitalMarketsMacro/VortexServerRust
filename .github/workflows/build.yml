@@ -11,6 +11,7 @@ name: build
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -126,3 +127,49 @@ jobs:
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
           retention-days: 14
+
+  # Publishes a GitHub release with the per-platform binaries attached.
+  # Fires only when both build jobs succeed AND the trigger was a vX.Y.Z
+  # tag push, so routine main-branch builds don't create releases.
+  release:
+    name: release ${{ github.ref_name }}
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (for README)
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package release assets
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          mkdir -p release staging-linux staging-windows
+
+          # Linux: tar.gz of the binary + README. upload-artifact strips
+          # the executable bit on the download path, so restore it.
+          cp artifacts/vortex-server-linux-x64/vortex-server staging-linux/
+          chmod +x staging-linux/vortex-server
+          cp README.md staging-linux/
+          tar -C staging-linux -czf "release/vortex-server-${tag}-x86_64-linux.tar.gz" .
+
+          # Windows: zip of the .exe + README
+          cp artifacts/vortex-server-windows-x64/vortex-server.exe staging-windows/
+          cp README.md staging-windows/
+          (cd staging-windows && zip -q "../release/vortex-server-${tag}-x86_64-windows.zip" .)
+
+          ls -lh release/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
