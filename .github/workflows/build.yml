@@ -158,12 +158,18 @@ jobs:
           cp artifacts/vortex-server-linux-x64/vortex-server staging-linux/
           chmod +x staging-linux/vortex-server
           cp README.md staging-linux/
-          tar -C staging-linux -czf "release/vortex-server-${tag}-x86_64-linux.tar.gz" .
+          tar -C staging-linux -czf "release/vortex-server-${tag}-x86_64-linux.tar.gz" \
+            vortex-server README.md
 
-          # Windows: zip of the .exe + README
+          # Windows: zip of the .exe + README. List files explicitly —
+          # `zip ... .` without -r reports "nothing to do" because it
+          # doesn't recurse, and listing files keeps the archive flat
+          # (no leading ./).
           cp artifacts/vortex-server-windows-x64/vortex-server.exe staging-windows/
           cp README.md staging-windows/
-          (cd staging-windows && zip -q "../release/vortex-server-${tag}-x86_64-windows.zip" .)
+          (cd staging-windows && \
+            zip -q "../release/vortex-server-${tag}-x86_64-windows.zip" \
+              vortex-server.exe README.md)
 
           ls -lh release/
 
