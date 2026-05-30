@@ -167,6 +167,29 @@ defaults and verify a binary exists with `conan install ... --build=never` (NOT
 `=missing`) — only flip the override off if that download succeeds, otherwise a
 default-options source fallback would hit the blocked thrift download.
 
+### Vendored Conan artifacts (offline / enterprise builds)
+
+To survive a machine that can't reach ConanCenter or upstream source URLs at
+all, two layers of Arrow are committed under
+`Vortex/crates/perspective-server/vendor/` (both tracked via **Git LFS** — run
+`git lfs install` / `git lfs pull` after cloning):
+
+- **`conan-cache/<platform>/arrow.tgz`** — a `conan cache save` of the pre-built
+  Arrow *binary*. `build.rs` (`restore_vendored_conan_binaries`) runs
+  `conan cache restore` on it before `conan install`, so Arrow is reused with no
+  download and no compile. Reused only when the resolved `package_id` matches, so
+  the profiles **pin `compiler.version`** (Windows → MSVC `194`). Regenerate with
+  `scripts/vendor-conan-arrow.{sh,ps1}` (run on a machine of that platform — the
+  Linux binary must be produced on Linux/CI, not from a Windows checkout).
+- **`conan-sources/<hash>/apache-arrow-*.tar.gz`** — the Arrow *source* archive,
+  wired into Conan's `core.sources:download_cache` by `build.rs`. Compiler-
+  independent fallback: if the binary's `package_id` doesn't match, Arrow still
+  builds *from source without any download*.
+
+Restore is best-effort: a missing tarball, an unfetched LFS pointer, or a
+`package_id` mismatch all fall through to the source archive / a normal download.
+See `vendor/conan-cache/README.md` for details.
+
 ### Solace (`solace-rs` / `solace-rs-sys` build.rs)
 
 - On first build, downloads a pinned `libsolclient` tarball (v7.26.1.8) for the active platform from `github.com/asimsedhain/solace-rs/releases`. ~30 MB. Override with `SOLCLIENT_TARBALL_URL=...` or `SOLCLIENT_LIB_PATH=/path/to/lib` to use a local copy.
