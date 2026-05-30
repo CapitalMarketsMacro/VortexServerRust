@@ -31,7 +31,7 @@ $Container             = 'vortex-nats'
 $HealthyTimeoutSeconds = 60
 $ClientPort            = 4222
 $MonitorPort           = 8222
-$VolumeName            = 'vortexserverrust_nats-storage'
+$VolumeName            = 'vortex-nats-storage'
 
 # ----- helpers ---------------------------------------------------------------
 

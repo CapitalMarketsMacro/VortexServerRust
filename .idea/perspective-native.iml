@@ -7,6 +7,12 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/perspective/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/perspective/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/examples/axum-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/Vortex/crates/perspective-client/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/Vortex/crates/perspective-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/Vortex/crates/perspective/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/Vortex/crates/perspective/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/Vortex/examples/axum-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
