@@ -133,6 +133,22 @@ Conan install → CMake configure → compile → link. Key details:
 - Protoc discovery order: Conan output → `PROTOC` env var → bundled `protobuf-src` → system PATH
 - Windows-specific links from the C++ side: `ole32, shell32, advapi32, bcrypt, ws2_32, crypt32, userenv`
 
+#### Offline / enterprise builds (Linux x86_64)
+
+For air-gapped machines with no conancenter access, `perspective-server/vendor/`
+ships two complementary offline assets, both consumed automatically by
+`build.rs` (and `Vortex/build.sh`) — no flags required:
+
+- `vendor/conan-sources/` — vendored Conan *source* archives (Arrow), wired via
+  `core.sources:download_cache`. Platform-neutral.
+- `vendor/conan-cache/linux-x64-static.tgz` — a `conan cache save` snapshot of
+  the full **recipes + prebuilt binaries** for the `linux-x64-static` profile,
+  tracked via **Git LFS** (`git lfs pull` to materialize). `build.rs` restores
+  it before `conan install` when on Linux x86_64 and the packages aren't
+  already cached. Keyed to **gcc 15 / libstdc++11 / Release / gnu17** — a
+  different host toolchain won't package-ID-match. See
+  `vendor/conan-cache/README.md` for refresh + offline-verify steps.
+
 ### Solace (`solace-rs` / `solace-rs-sys` build.rs)
 
 - On first build, downloads a pinned `libsolclient` tarball (v7.26.1.8) for the active platform from `github.com/asimsedhain/solace-rs/releases`. ~30 MB. Override with `SOLCLIENT_TARBALL_URL=...` or `SOLCLIENT_LIB_PATH=/path/to/lib` to use a local copy.
