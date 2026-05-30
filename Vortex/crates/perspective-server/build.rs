@@ -316,6 +316,14 @@ fn conan_install(manifest_dir: &Path) -> PathBuf {
     let conan_output_dir = manifest_dir.join("conan_output");
     fs::create_dir_all(&conan_output_dir).ok();
 
+    // Restore any vendored Conan binary packages for this platform into the
+    // local cache before install, so heavy deps (e.g. Arrow) come from a
+    // committed tarball instead of being downloaded or compiled from source.
+    // Best-effort: a package_id mismatch (e.g. a different compiler.version)
+    // or absent files just leave the cache untouched, and `--build=missing`
+    // falls back to the vendored source archive / a download.
+    restore_vendored_conan_binaries(manifest_dir);
+
     println!("cargo:warning=Running conan install with profile {profile} ...");
 
     let mut cmd = Command::new("conan");
@@ -380,6 +388,65 @@ fn conan_install(manifest_dir: &Path) -> PathBuf {
 
     println!("cargo:warning=Conan install succeeded");
     conan_output_dir
+}
+
+/// Restore vendored Conan binary packages (committed under
+/// `vendor/conan-cache/<platform>/*.tgz`) into the local Conan cache so the
+/// build reuses them instead of downloading/compiling. Best-effort: missing
+/// files, unfetched git-lfs pointers, or a failed restore all leave the cache
+/// as-is so the normal `conan install --build=missing` path takes over.
+fn restore_vendored_conan_binaries(manifest_dir: &Path) {
+    let platform = if cfg!(target_os = "windows") {
+        "windows-x64"
+    } else if cfg!(target_os = "linux") {
+        "linux-x64"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "macos-arm64"
+        } else {
+            "macos-x64"
+        }
+    } else {
+        return;
+    };
+
+    let dir = manifest_dir.join("vendor").join("conan-cache").join(platform);
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return, // no vendored binaries for this platform
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.extension().map_or(false, |e| e == "tgz") {
+            continue;
+        }
+
+        // A git-lfs pointer is a few hundred bytes; the real package is tens of
+        // MB. Restoring a pointer would fail, so skip and let the build fall
+        // back to the vendored source / a download.
+        if fs::metadata(&path).map(|m| m.len() < 4096).unwrap_or(true) {
+            println!(
+                "cargo:warning=Vendored Conan package {} looks like a git-lfs pointer \
+                 (run `git lfs pull`); skipping restore",
+                path.display()
+            );
+            continue;
+        }
+
+        println!("cargo:warning=Restoring vendored Conan package {}", path.display());
+        match Command::new("conan").arg("cache").arg("restore").arg(&path).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => println!(
+                "cargo:warning=conan cache restore exited {:?} for {}; continuing without it",
+                s.code(),
+                path.display()
+            ),
+            Err(e) => println!(
+                "cargo:warning=could not run conan cache restore ({e}); continuing without it"
+            ),
+        }
+    }
 }
 
 fn cmake_build() -> Result<Option<PathBuf>, std::io::Error> {
@@ -542,6 +609,7 @@ fn cmake_link_deps(cmake_build_dir: &Path) -> Result<(), std::io::Error> {
 
     println!("cargo:rerun-if-changed=cpp/perspective");
     println!("cargo:rerun-if-changed=conanfile.py");
+    println!("cargo:rerun-if-changed=vendor/conan-cache");
     Ok(())
 }
 

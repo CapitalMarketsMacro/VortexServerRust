@@ -1,0 +1,21 @@
+# Repo-local Cargo configuration.
+#
+# Point solace-rs-sys's build.rs at the vendored libsolclient instead of
+# letting it download the ~12 MB tarball from GitHub releases on every fresh
+# machine. Required in enterprise/offline environments with no egress to
+# github.com/asimsedhain/solace-rs/releases.
+#
+# The libs live in vendor/solclient/ (see vendor/solclient/README.md). With
+# SOLCLIENT_LIB_PATH set, build.rs skips the download entirely and links the
+# static archives (libsolclient, libsolclientssl, libssl, libcrypto) directly.
+#
+# `relative = true` resolves the path against the directory that contains this
+# `.cargo` directory (the repo root), so it works regardless of the cwd a build
+# is invoked from. `[env]` does not override an already-set SOLCLIENT_LIB_PATH,
+# so a developer can still point at a different copy via the environment.
+#
+# NOTE: the vendored libs are Linux x86_64 (glibc). On macOS / Windows / musl,
+# unset this (e.g. `SOLCLIENT_LIB_PATH= cargo build`) so build.rs downloads the
+# correct platform tarball, or vendor that platform's libs the same way.
+[env]
+SOLCLIENT_LIB_PATH = { value = "vendor/solclient/solclient-7.26.1.8/lib", relative = true }

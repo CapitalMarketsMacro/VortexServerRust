@@ -1,3 +1,4 @@
+mod api;
 mod config;
 mod ingress;
 mod logging;
@@ -96,17 +97,20 @@ async fn main() -> anyhow::Result<()> {
 /// per-table Perspective Server, so connections to different tables touch
 /// completely independent state.
 ///
+/// Clients can discover the table list and these paths at runtime via the
+/// `GET /api/tables` REST endpoint (see [`api`]).
+///
 /// Browser code:
 /// ```js
 /// const ws = new perspective.WebSocketClient("ws://host:4000/ws/Orders");
 /// const table = await ws.open_table("Orders");
 /// ```
 fn build_router(registry: &TableRegistry, ws_base: &str) -> Router {
-    let ws_base = ws_base.trim_end_matches('/').to_string();
+    let trimmed_base = ws_base.trim_end_matches('/').to_string();
     let mut app: Router = Router::new();
 
     for (name, slot) in registry.iter() {
-        let path = format!("{ws_base}/{name}");
+        let path = format!("{trimmed_base}/{name}");
         let table_router: Router = Router::new()
             .route("/", perspective::axum::websocket_handler())
             .with_state(slot.server.clone());
@@ -114,6 +118,10 @@ fn build_router(registry: &TableRegistry, ws_base: &str) -> Router {
         app = app.nest(&path, table_router);
         tracing::info!(table = %name, ws_path = %path, "registered WebSocket route");
     }
+
+    // Discovery REST API: GET /api/tables lists every table + its WS URL.
+    app = app.merge(api::router(registry, ws_base));
+    tracing::info!(api_path = "/api/tables", "registered discovery REST route");
 
     app
 }
