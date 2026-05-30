@@ -3,6 +3,12 @@ include(default)
 [settings]
 compiler.cppstd=17
 compiler.runtime=dynamic
+# Pin the MSVC toolset version that ConanCenter ships pre-built binaries for
+# (the dep versions in conanfile.py were chosen for 194). Without this, the
+# profile's include(default) floats to whatever VS is installed (e.g. 195),
+# changing every package_id so cached/vendored 194 binaries no longer match
+# and Conan rebuilds/downloads. v143 toolset ABI is stable across 194/195.
+compiler.version=194
 build_type=Release
 
 [options]
