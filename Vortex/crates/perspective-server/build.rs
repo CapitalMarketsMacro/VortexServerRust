@@ -210,6 +210,78 @@ fn conan_profile() -> &'static str {
     }
 }
 
+/// Restore the vendored Conan binary-cache snapshot for offline Linux builds.
+///
+/// No-op unless the snapshot exists, is materialized (not an unfetched Git LFS
+/// pointer), and the packages aren't already in the local cache. Any failure is
+/// logged and swallowed — the subsequent `conan install` then falls back to the
+/// network exactly as it would without a snapshot.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn maybe_restore_conan_cache(manifest_dir: &Path) {
+    let snapshot = manifest_dir
+        .join("vendor")
+        .join("conan-cache")
+        .join("linux-x64-static.tgz");
+    if !snapshot.is_file() {
+        return;
+    }
+
+    // A materialized snapshot is hundreds of MB; an un-smudged Git LFS pointer
+    // is ~130 bytes. Never feed a pointer to `conan cache restore`.
+    let len = fs::metadata(&snapshot).map(|m| m.len()).unwrap_or(0);
+    if len < 4096 {
+        println!(
+            "cargo:warning=vendored Conan cache at {} looks like an unmaterialized \
+             Git LFS pointer ({len} bytes) — run `git lfs pull`. Skipping restore.",
+            snapshot.display()
+        );
+        return;
+    }
+
+    // Already populated? Avoid re-extracting hundreds of MB on every build.
+    if conan_binary_cached("arrow/22.0.0") {
+        return;
+    }
+
+    println!(
+        "cargo:warning=Restoring vendored Conan binary cache (offline) from {} ...",
+        snapshot.display()
+    );
+    match Command::new("conan")
+        .arg("cache")
+        .arg("restore")
+        .arg(&snapshot)
+        .status()
+    {
+        Ok(s) if s.success() => println!("cargo:warning=Conan cache restore succeeded"),
+        Ok(s) => println!(
+            "cargo:warning=conan cache restore exited with {:?}; continuing \
+             (conan install will fall back to the network)",
+            s.code()
+        ),
+        Err(e) => println!("cargo:warning=failed to run `conan cache restore`: {e}; continuing"),
+    }
+}
+
+/// True if the local Conan cache already holds at least one *binary* package
+/// for `reference` (e.g. `arrow/22.0.0`). Uses a text heuristic over
+/// `conan list --format=json` to avoid pulling a JSON crate into build.rs:
+/// a populated cache shows `"packages": { "<id>": ... }`, while an empty or
+/// missing entry shows `"packages": {}` or an `"error"` field.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn conan_binary_cached(reference: &str) -> bool {
+    let Ok(output) = Command::new("conan")
+        .args(["list", &format!("{reference}:*"), "--format=json"])
+        .output()
+    else {
+        return false;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.contains("\"packages\":")
+        && !stdout.contains("\"packages\": {}")
+        && !stdout.contains("\"error\"")
+}
+
 /// Run `conan install` and return the path to the Conan output directory.
 /// Panics if Conan is not available — Conan is required for this build.
 fn conan_install(manifest_dir: &Path) -> PathBuf {
@@ -275,6 +347,17 @@ fn conan_install(manifest_dir: &Path) -> PathBuf {
             }
         }
     }
+
+    // ── Offline / enterprise: restore a vendored Conan *binary* cache ─────────
+    // The source download_cache above only avoids re-downloading source
+    // tarballs; Conan recipes and prebuilt binaries still come from
+    // conancenter. On an air-gapped Linux x86_64 box, restore a committed
+    // snapshot of the full linux-x64-static binary cache so the `conan install`
+    // below finds every package already built — zero network access required.
+    // See vendor/conan-cache/README.md for how the snapshot is produced and the
+    // exact toolchain it's keyed to.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    maybe_restore_conan_cache(manifest_dir);
 
     if profile_path.exists() {
         cmd.arg("--profile:host").arg(&profile_path);

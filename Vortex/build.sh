@@ -103,6 +103,26 @@ if [ -d "$VENDOR_SOURCES" ]; then
         echo "core.sources:download_cache=$VENDOR_SOURCES" >> "$GLOBAL_CONF"
     fi
 fi
+
+# Offline / enterprise: restore the vendored Conan *binary* cache snapshot so
+# this install needs zero conancenter access. Linux x86_64 only (the snapshot
+# is package-ID-specific). Skipped when arrow is already cached, or when the
+# tarball is an unfetched Git LFS pointer (~130 bytes). See
+# vendor/conan-cache/README.md.
+CONAN_CACHE_SNAPSHOT="$CONAN_DIR/vendor/conan-cache/linux-x64-static.tgz"
+if [ "$PROFILE_NAME" = "linux-x64-static" ] && [ -f "$CONAN_CACHE_SNAPSHOT" ]; then
+    SNAP_BYTES=$(wc -c < "$CONAN_CACHE_SNAPSHOT")
+    if [ "$SNAP_BYTES" -lt 4096 ]; then
+        echo "[WARN] $CONAN_CACHE_SNAPSHOT looks like an unmaterialized Git LFS pointer ($SNAP_BYTES bytes) — run 'git lfs pull'. Skipping restore."
+    elif conan list "arrow/22.0.0:*" --format=json 2>/dev/null | grep -q '"packages": {$'; then
+        # A non-empty block (`"packages": {` at end of line) means a binary is
+        # cached; an empty cache prints `"packages": {}` on one line.
+        echo "[OK] Conan binary cache already populated; skipping restore."
+    else
+        echo "--- Restoring vendored Conan binary cache (offline) ---"
+        conan cache restore "$CONAN_CACHE_SNAPSHOT" || echo "[WARN] conan cache restore failed; continuing (will try network)."
+    fi
+fi
 conan "${CONAN_ARGS[@]}"
 
 echo
