@@ -188,6 +188,13 @@ all, two layers of Arrow are committed under
 
 Restore is best-effort: a missing tarball, an unfetched LFS pointer, or a
 `package_id` mismatch all fall through to the source archive / a normal download.
+
+For fully air-gapped Linux x86_64 builds, we also vendor
+`vendor/conan-cache/linux-x64-static.tgz`: a full `conan cache save` snapshot
+of `linux-x64-static` recipes + prebuilt binaries. `build.rs` restores this
+best-effort before `conan install` (skipping when binaries are already cached),
+which enables zero-network dependency resolution when package IDs match
+(`gcc 15` / `libstdc++11` / `Release` / `gnu17`).
 See `vendor/conan-cache/README.md` for details.
 
 ### Solace (`solace-rs` / `solace-rs-sys` build.rs)
