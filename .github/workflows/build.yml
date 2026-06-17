@@ -1,10 +1,15 @@
 # Build vortex-server on Linux x86_64 and Windows x86_64.
 #
-# First run on a fresh cache takes ~30-45 min because Conan compiles
-# Arrow 22 from source (we set with_thrift=False / parquet=False, which
-# deviates from the prebuilt binary on conancenter). Subsequent runs
-# hit the cached ~/.conan2 and the cached Cargo target dir, dropping
-# to ~5 min.
+# C++ dependencies come entirely from ConanCenter PRE-BUILT binaries
+# (pinned in Vortex/crates/perspective-server/conan.lock) — nothing
+# compiles from source, so even a cold cache is fast. The "Verify C++
+# deps are pre-built" step enforces this with `conan install
+# --build=never`: if a toolchain/lockfile mismatch would trigger a
+# source build, the job fails loudly instead of silently compiling Arrow.
+#
+# The pre-built binaries exist only for specific toolchains, so the
+# runners are pinned to match: Linux uses gcc 13 (hence ubuntu-24.04 +
+# an explicit gcc-13), Windows uses msvc 194 (VS 2022 on windows-2022).
 
 name: build
 
@@ -30,13 +35,15 @@ jobs:
       matrix:
         include:
           - label: linux-x64
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             binary: vortex-server
+            conan_profile: linux-x64-static
           - label: windows-x64
             os: windows-2022
             target: x86_64-pc-windows-msvc
             binary: vortex-server.exe
+            conan_profile: windows-x64-static
 
     env:
       CARGO_TERM_COLOR: always
@@ -55,6 +62,22 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: Remove-Item -Force .cargo/config.toml
+
+      # ConanCenter's pre-built Arrow (and its transitive deps) for Linux
+      # is compiled with gcc 13 / libstdc++11. The package_id is keyed on
+      # the compiler major version, so building with any other gcc loses
+      # the pre-built match and falls back to a source build. Pin gcc 13
+      # and export CC/CXX so both `conan profile detect` and CMake/cc-rs
+      # use it consistently — keeping the binary ABI in sync with the
+      # downloaded prebuilts.
+      - name: Pin GCC 13 (Linux — matches ConanCenter prebuilt toolchain)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-13 g++-13
+          echo "CC=gcc-13"  >> "$GITHUB_ENV"
+          echo "CXX=g++-13" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain (nightly-2026-01-01)
         uses: dtolnay/rust-toolchain@master
@@ -93,13 +116,20 @@ jobs:
           shared-key: ${{ matrix.label }}
           cache-on-failure: true
 
+      # NOTE the `v2` salt: pre-migration caches were built on ubuntu-22.04
+      # with gcc 11 and the old source-build conanfile. They contain a stale
+      # ~/.conan2/profiles/default (gcc 11) that, if restored, would clobber
+      # the gcc-13 default detected above and make the prebuilt match fail.
+      # The salt ensures only post-migration caches are ever restored. (The
+      # "Verify" step below also re-runs `conan profile detect --force` after
+      # this restore as a second safeguard.)
       - name: Conan package cache
         uses: actions/cache@v4
         with:
           path: ~/.conan2
-          key: conan-${{ matrix.label }}-${{ hashFiles('Vortex/crates/perspective-server/conanfile.py', 'Vortex/crates/perspective-server/conan/profiles/*') }}
+          key: conan-v2-${{ matrix.label }}-${{ hashFiles('Vortex/crates/perspective-server/conanfile.py', 'Vortex/crates/perspective-server/conan.lock', 'Vortex/crates/perspective-server/conan/profiles/*') }}
           restore-keys: |
-            conan-${{ matrix.label }}-
+            conan-v2-${{ matrix.label }}-
 
       - name: Print build environment
         shell: bash
@@ -111,6 +141,30 @@ jobs:
           cargo --version
           cmake --version | head -1
           conan --version
+
+      # Enforce "pre-built only": resolve the full C++ dependency graph
+      # with --build=never, which downloads ConanCenter binaries but
+      # refuses to compile anything from source. If the lockfile or the
+      # runner toolchain drifts out of sync with the published prebuilts,
+      # this fails here with a clear "Missing prebuilt package" error
+      # (fix: realign the toolchain or regenerate conan.lock) instead of
+      # silently compiling Arrow for 30+ minutes during the cargo build.
+      # It also warms ~/.conan2 so the subsequent build compiles nothing.
+      - name: Verify C++ deps are pre-built (no source compilation)
+        shell: bash
+        run: |
+          # --force (not --exist-ok): re-pin the default profile to THIS
+          # runner's toolchain AFTER the cache restore, which may have
+          # overwritten ~/.conan2/profiles/default. On Linux CC/CXX=gcc-13
+          # are in the env so this detects gcc 13; on Windows the MSVC env
+          # is already set up so it detects msvc 194. The committed profiles
+          # only `include(default)`, so this is what keys the package_id.
+          conan profile detect --force
+          conan install Vortex/crates/perspective-server \
+            --output-folder "${RUNNER_TEMP}/conan-verify" \
+            --profile:host "Vortex/crates/perspective-server/conan/profiles/${{ matrix.conan_profile }}" \
+            --lockfile Vortex/crates/perspective-server/conan.lock \
+            --build=never
 
       # Do NOT set shell: bash here. On Windows that puts Git's
       # /usr/bin/link (a coreutils alias for ln) ahead of MSVC's

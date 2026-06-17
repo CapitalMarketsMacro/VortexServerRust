@@ -102,9 +102,9 @@ only talk to local brokers, which aren't intercepted). On older Node, set
 `NODE_EXTRA_CA_CERTS` to a PEM containing your corporate root instead.
 
 The same TLS interception also blocks **Conan** (`center2.conan.io` →
-`CERTIFICATE_VERIFY_FAILED`) when building the C++ engine — see the "Corporate
-networks: Conan TLS trust & pre-built binaries" section in `CLAUDE.md` for the
-`CONAN_CACERT_PATH` fix. (Python sims are unaffected; pip uses the Windows store.)
+`CERTIFICATE_VERIFY_FAILED`) when building the C++ engine — see the "C++
+dependencies: pre-built only" section in `CLAUDE.md` (the "Corporate TLS note")
+for the `CONAN_CACERT_PATH` fix. (Python sims are unaffected; pip uses the Windows store.)
 
 ## Common flags
 

@@ -29,6 +29,7 @@ include = [
     "docs/**/*",
     "cmake/**/*",
     "conanfile.py",
+    "conan.lock",
     "conan/**/*",
     "Cargo.toml",
 ]

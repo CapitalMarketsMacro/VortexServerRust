@@ -3,6 +3,10 @@ dist/
 Vortex/dist/
 conan_output/
 Vortex/conan_output/
+# Conan cmake_layout's default output dir (created when conan install is run
+# without --output-folder, e.g. during manual lockfile regeneration). The
+# real build uses --output-folder conan_output, so this never appears there.
+Vortex/crates/perspective-server/build/
 
 # Local runtime config and logs
 config.json
@@ -13,10 +17,6 @@ logs/
 .idea/
 *.so
 *~
-
-# Conan download cache metadata (only the tarball is needed)
-vendor/conan-sources/locks/
-vendor/conan-sources/s/
 
 # Simulator runtime artefacts — each simulator stages its own venv /
 # node_modules on first run; we never commit them.

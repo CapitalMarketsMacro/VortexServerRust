@@ -21,10 +21,10 @@ build.bat
 
 The script will:
 1. Check prerequisites and install Conan if needed
-2. Download and build C++ dependencies via Conan
+2. Download pre-built C++ dependencies via Conan (pinned by `crates/perspective-server/conan.lock`)
 3. Build the C++ engine and Rust crates
 
-First build takes ~15-20 min (Conan compiles dependencies). Subsequent builds reuse the cache.
+First build takes ~5-10 min on the supported toolchains (gcc 13 / MSVC 2022 / apple-clang 17), where Conan downloads pre-built binaries rather than compiling them; other toolchains source-compile the C++ deps and take longer. Subsequent builds reuse the cache.
 
 ## Usage
 

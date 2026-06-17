@@ -93,36 +93,12 @@ echo "--- Installing C++ dependencies (Conan) ---"
 echo "  Profile: $PROFILE_NAME"
 echo
 
+# --build=missing builds only deps with no pre-built binary; conan.lock
+# pins an all-pre-built graph for the supported profiles, so nothing
+# compiles from source there. See Vortex/crates/perspective-server/conanfile.py.
 CONAN_ARGS=(install "$CONAN_DIR" --output-folder "$CONAN_DIR/conan_output" --build=missing)
 [ -f "$PROFILE_FILE" ] && CONAN_ARGS+=(--profile:host "$PROFILE_FILE")
-VENDOR_SOURCES="$CONAN_DIR/vendor/conan-sources"
-if [ -d "$VENDOR_SOURCES" ]; then
-    CONAN_HOME=$(conan config home)
-    GLOBAL_CONF="$CONAN_HOME/global.conf"
-    if ! grep -q "core.sources:download_cache" "$GLOBAL_CONF" 2>/dev/null; then
-        echo "core.sources:download_cache=$VENDOR_SOURCES" >> "$GLOBAL_CONF"
-    fi
-fi
-
-# Offline / enterprise: restore the vendored Conan *binary* cache snapshot so
-# this install needs zero conancenter access. Linux x86_64 only (the snapshot
-# is package-ID-specific). Skipped when arrow is already cached, or when the
-# tarball is an unfetched Git LFS pointer (~130 bytes). See
-# vendor/conan-cache/README.md.
-CONAN_CACHE_SNAPSHOT="$CONAN_DIR/vendor/conan-cache/linux-x64-static.tgz"
-if [ "$PROFILE_NAME" = "linux-x64-static" ] && [ -f "$CONAN_CACHE_SNAPSHOT" ]; then
-    SNAP_BYTES=$(wc -c < "$CONAN_CACHE_SNAPSHOT")
-    if [ "$SNAP_BYTES" -lt 4096 ]; then
-        echo "[WARN] $CONAN_CACHE_SNAPSHOT looks like an unmaterialized Git LFS pointer ($SNAP_BYTES bytes) — run 'git lfs pull'. Skipping restore."
-    elif conan list "arrow/22.0.0:*" --format=json 2>/dev/null | grep -q '"packages": {$'; then
-        # A non-empty block (`"packages": {` at end of line) means a binary is
-        # cached; an empty cache prints `"packages": {}` on one line.
-        echo "[OK] Conan binary cache already populated; skipping restore."
-    else
-        echo "--- Restoring vendored Conan binary cache (offline) ---"
-        conan cache restore "$CONAN_CACHE_SNAPSHOT" || echo "[WARN] conan cache restore failed; continuing (will try network)."
-    fi
-fi
+[ -f "$CONAN_DIR/conan.lock" ] && CONAN_ARGS+=(--lockfile "$CONAN_DIR/conan.lock")
 conan "${CONAN_ARGS[@]}"
 
 echo

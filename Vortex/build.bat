@@ -65,17 +65,16 @@ set "PROFILE_FILE=%CONAN_DIR%\conan\profiles\windows-x64-static"
 set "CONAN_OUTPUT=%CONAN_DIR%\conan_output"
 if not exist "%CONAN_OUTPUT%" mkdir "%CONAN_OUTPUT%"
 
-set "VENDOR_SOURCES=%CONAN_DIR%\vendor\conan-sources"
-if exist "%VENDOR_SOURCES%" (
-    for /f "tokens=*" %%h in ('conan config home') do set "CONAN_HOME=%%h"
-    findstr /c:"core.sources:download_cache" "!CONAN_HOME!\global.conf" >nul 2>&1
-    if !errorlevel! neq 0 echo core.sources:download_cache=%VENDOR_SOURCES%>> "!CONAN_HOME!\global.conf"
-)
+set "LOCKFILE_ARG="
+if exist "%CONAN_DIR%\conan.lock" set "LOCKFILE_ARG=--lockfile "%CONAN_DIR%\conan.lock""
 
+:: --build=missing builds only deps with no pre-built binary; conan.lock
+:: pins an all-pre-built graph for the supported profiles (Windows msvc 194
+:: here), so nothing compiles from source.
 if exist "%PROFILE_FILE%" (
-    conan install "%CONAN_DIR%" --output-folder "%CONAN_OUTPUT%" --build=missing --profile:host "%PROFILE_FILE%"
+    conan install "%CONAN_DIR%" --output-folder "%CONAN_OUTPUT%" --build=missing --profile:host "%PROFILE_FILE%" %LOCKFILE_ARG%
 ) else (
-    conan install "%CONAN_DIR%" --output-folder "%CONAN_OUTPUT%" --build=missing
+    conan install "%CONAN_DIR%" --output-folder "%CONAN_OUTPUT%" --build=missing %LOCKFILE_ARG%
 )
 
 if %errorlevel% neq 0 (

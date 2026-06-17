@@ -59,8 +59,10 @@ the static lib, named `libsolclient.a` on macOS/Linux or
 git clone https://github.com/CapitalMarketsMacro/VortexServerRust.git
 cd VortexServerRust
 
-# 2. Build (first run builds C++ dependencies via Conan + libsolclient download
-#    — ~15-20 min, cached after)
+# 2. Build (first run downloads pre-built C++ deps via Conan + libsolclient,
+#    then compiles the Perspective C++ bridge — ~5-10 min, cached after.
+#    Needs gcc 13 / MSVC 2022 / apple-clang 17 for the prebuilt fast path;
+#    otherwise Conan compiles the C++ deps from source.)
 cargo build
 
 # 3. Copy and edit configuration
@@ -77,7 +79,8 @@ cargo run -p vortex-server
 git clone https://github.com/CapitalMarketsMacro/VortexServerRust.git
 Set-Location VortexServerRust
 
-# 2. Build — same toolchain story as on Unix; expect ~15-20 min on first run
+# 2. Build — prebuilt Conan deps + C++ bridge; ~5-10 min first run, cached after
+#    (MSVC 2022 / msvc 194 gives the prebuilt fast path; else Conan source-builds)
 cargo build
 
 # 3. Copy and edit configuration
@@ -312,7 +315,7 @@ Vortex/                    — Perspective engine dependency (C++ + Rust binding
 ## Build Commands
 
 ```bash
-# Full C++ + Rust build (first run ~15-20 min due to Conan; cached after)
+# Full C++ + Rust build (first run ~5-10 min: prebuilt Conan deps + C++ bridge; cached after)
 cd Vortex && ./build.sh      # Linux/macOS
 cd Vortex && build.bat       # Windows
 
@@ -587,7 +590,13 @@ to `ws://localhost:4000/ws/<TableName>` to view live data.
 | Linux | x86_64 | Supported |
 | Windows | x86_64 | Supported |
 
-C++ dependencies are downloaded as pre-built binaries via Conan 2 where available. The Conan default profile is auto-detected on first build.
+C++ dependencies are downloaded as **pre-built binaries** via Conan 2 —
+nothing compiles from source. The exact, all-prebuilt dependency graph is
+pinned in `Vortex/crates/perspective-server/conan.lock`. Pre-built binaries
+are toolchain-specific, so the fast (no-source-compile) path needs **gcc 13**
+on Linux, **MSVC 2022 (msvc 194)** on Windows, or **apple-clang 17** on macOS;
+on any other toolchain the build still works but falls back to compiling the
+C++ deps from source. See CLAUDE.md → "C++ dependencies: pre-built only".
 
 ## License
 

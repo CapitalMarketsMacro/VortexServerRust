@@ -129,73 +129,65 @@ perspective          (facade + Axum WebSocket server)
 
 Conan install → CMake configure → compile → link. Key details:
 - Conan profiles in `conan/profiles/` (`windows-x64-static`, `linux-x64-static`, `macos-{x64,arm64}-static`). On first build, `build.rs` auto-detects the right profile from `target_os`/`target_arch`.
-- Dependencies in `conanfile.py`: Arrow 22, protobuf 6.33, boost 1.86, re2, abseil, rapidjson, etc.
+- Dependencies in `conanfile.py`: Arrow 22, protobuf 6.33, boost 1.90, re2, abseil, rapidjson, date, tsl-*, exprtk. **All resolve to pre-built ConanCenter binaries — nothing compiles from source** (see below).
 - Protoc discovery order: Conan output → `PROTOC` env var → bundled `protobuf-src` → system PATH
 - Windows-specific links from the C++ side: `ole32, shell32, advapi32, bcrypt, ws2_32, crypt32, userenv`
 
-### Corporate networks: Conan TLS trust & pre-built binaries
+### C++ dependencies: pre-built only (Conan + lockfile)
 
-In a corporate environment, **prefer downloading pre-built Conan binaries over
-compiling from source** — source archives are often blocked or slow, and Arrow
-is by far the biggest source build. Two things gate this:
+Every C++ dependency downloads as a **pre-built binary** from ConanCenter —
+the build never compiles Arrow (or anything else) from source. Two pieces make
+this reliable and reproducible:
 
-**1. Conan must trust the corporate TLS root.** On a TLS-intercepting network
-(e.g. Norton Web/Mail Shield, Zscaler), `conan install` fails against
-`center2.conan.io` with `CERTIFICATE_VERIFY_FAILED ... unable to get local
-issuer certificate`, so it can download *nothing* and falls back to the local
-`~/.conan2` cache (compiling anything not already cached). Conan uses
-python-requests, so point it at a CA bundle that includes the corporate root —
-e.g. export the Windows Trusted Root store to a PEM, then:
+**1. `conanfile.py` uses Arrow's ConanCenter default options.** ConanCenter only
+publishes a pre-built `arrow/22.0.0` binary for its *default* option set
+(`parquet=True`, `with_thrift=True`); thrift itself is also pre-built, so enabling
+it never reaches `archive.apache.org`. `boost` is pinned to **1.90.0** to match the
+boost version Arrow's prebuilt was linked against — a different boost major.minor
+changes Arrow's `package_id` and loses the prebuilt match. (Perspective uses boost
+header-only, so the version isn't otherwise constrained.) There is **no
+`configure()` override** — adding one (e.g. `parquet=False`) would force a source
+build, which is exactly what we removed.
 
-```powershell
-setx CONAN_CACERT_PATH C:\path\corp-roots.pem
-# or add to ~/.conan2/global.conf:  core.net.http:cacert_path=C:/path/corp-roots.pem
-# (REQUESTS_CA_BUNDLE also works)
+**2. `conan.lock` pins the exact, drift-proof graph.** `Vortex/crates/perspective-server/conan.lock`
+freezes every recipe revision + package_id for a graph that is 100% pre-built on the
+supported profiles. `build.rs` / `build.sh` / `build.bat` pass `--lockfile`, so a
+*newer* ConanCenter recipe revision (e.g. a fresh `xsimd` rev published after Arrow's
+binary was built) can never silently flip a dependency back to a source build. CI's
+"Verify C++ deps are pre-built" step runs `conan install … --build=never` to enforce
+this — it fails loudly on any mismatch instead of compiling Arrow for 30+ minutes.
+
+**Pre-built binaries are toolchain-specific.** The published binaries exist for
+**Linux gcc 13 (libstdc++11)**, **Windows msvc 194 (VS 2022)**, and **macOS
+apple-clang 17** — all with `cppstd=gnu17`/`17`, `Release`, static. A package_id
+is keyed on the compiler *major* version, so building with e.g. gcc 11 loses the
+match and falls back to a source build (`--build=missing` still succeeds, just
+slowly). CI therefore pins gcc 13 on Linux (ubuntu-24.04 + explicit `gcc-13`) and
+relies on msvc 194 from the windows-2022 image. On an unsupported local toolchain
+(e.g. a Mac with a newer apple-clang) the build gracefully source-compiles instead
+of failing.
+
+**Regenerating the lockfile** (after a dependency version bump, or to refresh the
+pinned revisions) — accumulate every target profile into one union lockfile:
+
+```bash
+cd Vortex/crates/perspective-server
+rm -f conan.lock
+conan lock create . --profile:all conan/profiles/linux-x64-static   --lockfile-out conan.lock
+conan lock create . --profile:all conan/profiles/windows-x64-static --lockfile conan.lock --lockfile-out conan.lock
+conan lock create . --profile:all conan/profiles/macos-arm64-static --lockfile conan.lock --lockfile-out conan.lock
+# verify nothing would build from source for the enterprise targets:
+conan install . --profile:all conan/profiles/linux-x64-static   --lockfile conan.lock --build=never
+conan install . --profile:all conan/profiles/windows-x64-static --lockfile conan.lock --build=never
 ```
 
-A normal *incremental* `cargo build` is unaffected (deps are cached); this only
-bites a clean/fresh build (e.g. `cargo clippy` on a fresh checkout).
-
-**2. Arrow currently builds from source by design.** `conanfile.py`'s
-`configure()` sets `arrow.parquet=False` + `arrow.with_thrift=False`. ConanCenter's
-Arrow recipe **defaults** are `parquet=True` / `with_thrift=True`, so our options
-produce a package_id ConanCenter never pre-built → `--build=missing` compiles
-Arrow from source. This is a **deliberate corporate-env workaround**: it lets
-Arrow build *without* pulling thrift from `archive.apache.org` (a commonly-blocked
-source URL). To switch to a pre-built Arrow, first fix (1), then match the recipe
-defaults and verify a binary exists with `conan install ... --build=never` (NOT
-`=missing`) — only flip the override off if that download succeeds, otherwise a
-default-options source fallback would hit the blocked thrift download.
-
-### Vendored Conan artifacts (offline / enterprise builds)
-
-To survive a machine that can't reach ConanCenter or upstream source URLs at
-all, two layers of Arrow are committed under
-`Vortex/crates/perspective-server/vendor/` (both tracked via **Git LFS** — run
-`git lfs install` / `git lfs pull` after cloning):
-
-- **`conan-cache/<platform>/arrow.tgz`** — a `conan cache save` of the pre-built
-  Arrow *binary*. `build.rs` (`restore_vendored_conan_binaries`) runs
-  `conan cache restore` on it before `conan install`, so Arrow is reused with no
-  download and no compile. Reused only when the resolved `package_id` matches, so
-  the profiles **pin `compiler.version`** (Windows → MSVC `194`). Regenerate with
-  `scripts/vendor-conan-arrow.{sh,ps1}` (run on a machine of that platform — the
-  Linux binary must be produced on Linux/CI, not from a Windows checkout).
-- **`conan-sources/<hash>/apache-arrow-*.tar.gz`** — the Arrow *source* archive,
-  wired into Conan's `core.sources:download_cache` by `build.rs`. Compiler-
-  independent fallback: if the binary's `package_id` doesn't match, Arrow still
-  builds *from source without any download*.
-
-Restore is best-effort: a missing tarball, an unfetched LFS pointer, or a
-`package_id` mismatch all fall through to the source archive / a normal download.
-
-For fully air-gapped Linux x86_64 builds, we also vendor
-`vendor/conan-cache/linux-x64-static.tgz`: a full `conan cache save` snapshot
-of `linux-x64-static` recipes + prebuilt binaries. `build.rs` restores this
-best-effort before `conan install` (skipping when binaries are already cached),
-which enables zero-network dependency resolution when package IDs match
-(`gcc 15` / `libstdc++11` / `Release` / `gnu17`).
-See `vendor/conan-cache/README.md` for details.
+**Corporate TLS note.** On a TLS-intercepting network (Zscaler, Norton), `conan
+install` fails against `center2.conan.io` with `CERTIFICATE_VERIFY_FAILED` and can
+download *nothing*. Conan uses python-requests, so point it at a CA bundle that
+includes the corporate root: `CONAN_CACERT_PATH=/path/corp-roots.pem` (or
+`core.net.http:cacert_path` in `~/.conan2/global.conf`; `REQUESTS_CA_BUNDLE` also
+works). An incremental `cargo build` is unaffected (deps cached); this only bites a
+clean/fresh checkout.
 
 ### Solace (`solace-rs` / `solace-rs-sys` build.rs)
 
