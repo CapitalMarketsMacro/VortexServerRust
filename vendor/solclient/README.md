@@ -20,13 +20,18 @@ here and the build is pointed at it via `SOLCLIENT_LIB_PATH`, which makes
 | `solclient-7.26.1.8/lib/` | Extracted static libs + license files. Pruned to what static linking needs. |
 
 `solclient-7.26.1.8/lib/` keeps only the static archives `build.rs` links —
-`libsolclient.a` (→ `libsolclient.a.7.26.1.8`), `libsolclientssl.a`,
-`libssl.a`, `libcrypto.a` — plus `licenses.txt` / `README.openssl`. The
-shared `.so*` libs, debug `_d` variants, and `include/` headers were dropped
-(not used by the static-only link); recover them from the tarball if needed.
+`libsolclient.a`, `libsolclientssl.a`, `libssl.a`, `libcrypto.a` — plus
+`licenses.txt` / `README.openssl`. The shared `.so*` libs, debug `_d`
+variants, and `include/` headers were dropped (not used by the static-only
+link); recover them from the tarball if needed.
 
-Note: `libsolclient.a` is a symlink to `libsolclient.a.7.26.1.8`; both are
-committed. (Linux/macOS preserve symlinks; this set is Linux-only anyway.)
+Note: upstream ships `libsolclient.a` as a symlink to a versioned
+`libsolclient.a.7.26.1.8`. We commit it as a **real file** named
+`libsolclient.a` (the name the linker requests via
+`cargo:rustc-link-lib=static=solclient`) — committed symlinks break on
+Windows / `core.symlinks=false` / some enterprise checkouts, where the link
+materializes as a tiny text file and the static link fails. The versioned
+duplicate is not needed and is not committed.
 
 ## How it's wired
 
