@@ -485,6 +485,36 @@ match_all::operator()(t_parameter_list parameters) {
     return rval;
 }
 
+contains::contains() : exprtk::igeneric_function<t_tscalar>("TS") {}
+
+contains::~contains() = default;
+
+t_tscalar
+contains::operator()(t_parameter_list parameters) {
+    t_tscalar rval;
+    rval.clear();
+    rval.m_type = DTYPE_BOOL;
+
+    t_scalar_view str_view(parameters[0]);
+    t_string_view needle_view(parameters[1]);
+
+    t_tscalar str = str_view();
+    std::string needle =
+        std::string(needle_view.begin(), needle_view.end());
+
+    if (str.get_dtype() != DTYPE_STR || str.m_status == STATUS_CLEAR) {
+        rval.m_status = STATUS_CLEAR;
+        return rval;
+    }
+
+    if (!str.is_valid()) {
+        return rval;
+    }
+
+    rval.set(str.to_string().find(needle) != std::string::npos);
+    return rval;
+}
+
 search::search(
     t_expression_vocab& expression_vocab,
     t_regex_mapping& regex_mapping,
@@ -540,6 +570,8 @@ search::operator()(t_parameter_list parameters) {
         return rval;
     }
 
+    // re2 >= 2023 aliases re2::StringPiece to absl::string_view, which has no
+    // ToString(); construct the std::string explicitly.
     rval.set(m_expression_vocab.intern(std::string(result)));
 
     return rval;
@@ -947,19 +979,12 @@ hour_of_day::operator()(t_parameter_list parameters) {
     val.set(temp_scalar);
 
     if (val.get_dtype() == DTYPE_TIME) {
-        // Convert the int64 to a milliseconds duration timestamp
-        std::chrono::milliseconds timestamp(val.to_int64());
-
-        // Convert the timestamp to a `sys_time` (alias for `time_point`)
-        date::sys_time<std::chrono::milliseconds> ts(timestamp);
-
-        // Use localtime so that the hour of day is consistent with all
-        // output datetimes, which are in local time
-        std::time_t temp = std::chrono::system_clock::to_time_t(ts);
-        std::tm* t = std::localtime(&temp);
+        // Break down the UTC timestamp in UTC — the host timezone must not
+        // affect engine results (native and WASM builds must agree)
+        std::tm t = gmtime_from_epoch_ms(val.to_int64());
 
         // Get the hour from the resulting `std::tm`
-        rval.set(static_cast<double>(t->tm_hour));
+        rval.set(static_cast<double>(t.tm_hour));
     } else {
         // Hour of day for date column is always 0
         rval.set(0.0);
@@ -1039,19 +1064,12 @@ day_of_week::operator()(t_parameter_list parameters) {
     std::string result;
 
     if (val.get_dtype() == DTYPE_TIME) {
-        // Convert the int64 to a milliseconds duration timestamp
-        std::chrono::milliseconds timestamp(val.to_int64());
-
-        // Convert the timestamp to a `sys_time` (alias for `time_point`)
-        date::sys_time<std::chrono::milliseconds> ts(timestamp);
-
-        // Use localtime so that the hour of day is consistent with all
-        // output datetimes, which are in local time
-        std::time_t temp = std::chrono::system_clock::to_time_t(ts);
-        std::tm* t = std::localtime(&temp);
+        // Break down the UTC timestamp in UTC — the host timezone must not
+        // affect engine results (native and WASM builds must agree)
+        std::tm t = gmtime_from_epoch_ms(val.to_int64());
 
         // Get the weekday from the resulting `std::tm`
-        result = days_of_week[t->tm_wday];
+        result = days_of_week[t.tm_wday];
     } else {
         // Retrieve the `t_date` struct from the scalar
         t_date date_val = val.get<t_date>();
@@ -1123,22 +1141,12 @@ month_of_year::operator()(t_parameter_list parameters) {
     std::string result;
 
     if (val.get_dtype() == DTYPE_TIME) {
-        // Convert the int64 to a milliseconds duration timestamp
-        std::chrono::milliseconds timestamp(val.to_int64());
-
-        // Convert the timestamp to a `sys_time` (alias for `time_point`)
-        date::sys_time<std::chrono::milliseconds> ts(timestamp);
-
-        // Use localtime so that the hour of day is consistent with all
-        // output datetimes, which are in local time
-        std::time_t temp = std::chrono::system_clock::to_time_t(ts);
-        std::tm* t = std::localtime(&temp);
-
-        // Get the month from the resulting `std::tm`
-        auto month = t->tm_mon;
+        // Break down the UTC timestamp in UTC — the host timezone must not
+        // affect engine results (native and WASM builds must agree)
+        std::tm t = gmtime_from_epoch_ms(val.to_int64());
 
         // Get the month string and write into the output column
-        result = months_of_year[month];
+        result = months_of_year[t.tm_mon];
     } else {
         t_date date_val = val.get<t_date>();
 
@@ -1406,28 +1414,10 @@ void
 _day_bucket(t_tscalar& val, t_tscalar& rval) {
     switch (val.get_dtype()) {
         case DTYPE_TIME: {
-            // Convert the int64 to a milliseconds duration timestamp
-            std::chrono::milliseconds ms_timestamp(val.to_int64());
-
-            // Convert the timestamp to a `sys_time` (alias for
-            // `time_point`)
-            date::sys_time<std::chrono::milliseconds> ts(ms_timestamp);
-
-            // Use localtime so that the day of week is consistent with all
-            // output datetimes, which are in local time
-            std::time_t temp = std::chrono::system_clock::to_time_t(ts);
-
-            // Convert to a std::tm
-            std::tm* t = std::localtime(&temp);
-
-            // Get the year and create a new `t_date`
-            auto year = static_cast<std::int32_t>(t->tm_year + 1900);
-
-            // Month in `t_date` is [0-11]
-            std::int32_t month = static_cast<std::uint32_t>(t->tm_mon);
-            auto day = static_cast<std::uint32_t>(t->tm_mday);
-
-            rval.set(t_date(year, month, day));
+            // The UTC calendar day containing the UTC timestamp — the host
+            // timezone must not affect engine results (native and WASM
+            // builds must agree)
+            rval.set(t_date::from_epoch_ms(val.to_int64()));
         } break;
         case DTYPE_DATE:
         default: {
@@ -1473,24 +1463,15 @@ _week_bucket(t_tscalar& val, t_tscalar& rval) {
             rval.set(new_date);
         } break;
         case DTYPE_TIME: {
-            // Convert the int64 to a milliseconds duration timestamp
-            std::chrono::milliseconds timestamp(val.to_int64());
-
-            // Convert the timestamp to a `sys_time` (alias for
-            // `time_point`)
-            date::sys_time<std::chrono::milliseconds> ts(timestamp);
-
-            // Convert the timestamp to local time
-            std::time_t temp = std::chrono::system_clock::to_time_t(ts);
-            std::tm* t = std::localtime(&temp);
-
-            // Take the ymd from the `tm`, now in local time, and create a
+            // Take the ymd of the UTC timestamp in UTC — the host timezone
+            // must not affect engine results — and create a
             // date::year_month_day.
-            date::year year{1900 + t->tm_year};
+            std::tm t = gmtime_from_epoch_ms(val.to_int64());
+            date::year year{1900 + t.tm_year};
 
             // date::month is [1-12], whereas `std::tm::tm_mon` is [0-11]
-            date::month month{static_cast<std::uint32_t>(t->tm_mon) + 1};
-            date::day day{static_cast<std::uint32_t>(t->tm_mday)};
+            date::month month{static_cast<std::uint32_t>(t.tm_mon) + 1};
+            date::day day{static_cast<std::uint32_t>(t.tm_mday)};
             date::year_month_day ymd(year, month, day);
 
             // Convert to a `sys_days` representing no. of days since epoch
@@ -1530,21 +1511,13 @@ _month_bucket(t_tscalar& val, t_tscalar& rval, t_uindex multiplicity) {
             rval.set(t_date(date_val.year(), out_month, 1));
         } break;
         case DTYPE_TIME: {
-            // Convert the int64 to a milliseconds duration
-            // timestamp
-            std::chrono::milliseconds ms_timestamp(val.to_int64());
-
-            // Convert the timestamp to a `sys_time` (alias for
-            // `time_point`)
-            date::sys_time<std::chrono::milliseconds> ts(ms_timestamp);
-
-            // Convert the timestamp to local time
-            std::time_t temp = std::chrono::system_clock::to_time_t(ts);
-            std::tm* t = std::localtime(&temp);
+            // Break down the UTC timestamp in UTC — the host timezone must
+            // not affect engine results
+            std::tm t = gmtime_from_epoch_ms(val.to_int64());
 
             // Use the `tm` to create the `t_date`
-            auto year = static_cast<std::int32_t>(t->tm_year + 1900);
-            std::int32_t month = static_cast<std::uint32_t>(t->tm_mon);
+            auto year = static_cast<std::int32_t>(t.tm_year + 1900);
+            std::int32_t month = static_cast<std::uint32_t>(t.tm_mon);
             if (multiplicity != 1) {
                 month = floor(static_cast<double>(month) / multiplicity)
                     * multiplicity;
@@ -1569,19 +1542,12 @@ _year_bucket(t_tscalar& val, t_tscalar& rval, t_uindex multiplicity) {
             ));
         } break;
         case DTYPE_TIME: {
-            // Convert the int64 to a milliseconds duration timestamp
-            std::chrono::milliseconds ms_timestamp(val.to_int64());
-
-            // Convert the timestamp to a `sys_time` (alias for
-            // `time_point`)
-            date::sys_time<std::chrono::milliseconds> ts(ms_timestamp);
-
-            // Convert the timestamp to local time
-            std::time_t temp = std::chrono::system_clock::to_time_t(ts);
-            std::tm* t = std::localtime(&temp);
+            // Break down the UTC timestamp in UTC — the host timezone must
+            // not affect engine results
+            std::tm t = gmtime_from_epoch_ms(val.to_int64());
 
             // Use the `tm` to create the `t_date`
-            auto year = static_cast<std::int32_t>(t->tm_year + 1900);
+            auto year = static_cast<std::int32_t>(t.tm_year + 1900);
             if (multiplicity != 1) {
                 year = floor(static_cast<double>(year) / multiplicity)
                     * multiplicity;
@@ -1609,27 +1575,13 @@ today() {
     t_tscalar rval;
 
     auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-    );
+                   std::chrono::system_clock::now().time_since_epoch()
+    )
+                   .count();
 
-    // Convert the timestamp to a `sys_time` (alias for `time_point`)
-    date::sys_time<std::chrono::milliseconds> ts(now);
-
-    // Use localtime so that the day of week is consistent with all output
-    // datetimes, which are in local time
-    std::time_t temp = std::chrono::system_clock::to_time_t(ts);
-
-    // Convert to a std::tm
-    std::tm* t = std::localtime(&temp);
-
-    // Get the year and create a new `t_date`
-    auto year = static_cast<std::int32_t>(t->tm_year + 1900);
-
-    // Month in `t_date` is [0-11]
-    std::int32_t month = static_cast<std::uint32_t>(t->tm_mon);
-    auto day = static_cast<std::uint32_t>(t->tm_mday);
-
-    rval.set(t_date(year, month, day));
+    // The current UTC calendar day, consistent with `bucket("x", 'D')` of
+    // `now()` — the host timezone must not affect engine results
+    rval.set(t_date::from_epoch_ms(now));
     return rval;
 }
 
@@ -1769,6 +1721,78 @@ max_fn::operator()(t_parameter_list parameters) {
     return rval;
 }
 
+coalesce::coalesce() = default;
+
+coalesce::~coalesce() = default;
+
+t_tscalar
+coalesce::operator()(t_parameter_list parameters) {
+    t_tscalar rval;
+    rval.clear();
+
+    if (parameters.size() == 0) {
+        rval.m_status = STATUS_CLEAR;
+        return rval;
+    }
+
+    std::vector<t_tscalar> inputs;
+    inputs.resize(parameters.size());
+
+    // Pass 1: type-check all parameters and resolve the output dtype.
+    // Loose matching: any combination of numeric types promotes to FLOAT64,
+    // matching the precedent set by min_fn / max_fn. Non-numeric types
+    // must share an exact dtype.
+    bool all_numeric = true;
+    t_dtype first_dtype = DTYPE_NONE;
+
+    for (auto i = 0; i < parameters.size(); ++i) {
+        t_generic_type& gt = parameters[i];
+        if (gt.type != t_generic_type::e_scalar) {
+            rval.m_status = STATUS_CLEAR;
+            return rval;
+        }
+
+        t_scalar_view _temp(gt);
+        t_tscalar temp = _temp();
+        inputs[i] = temp;
+
+        auto dt = static_cast<t_dtype>(temp.m_type);
+        bool numeric = is_numeric_type(dt);
+
+        if (i == 0) {
+            first_dtype = dt;
+            all_numeric = numeric;
+        } else if (all_numeric && numeric) {
+            // both numeric so far - stays in promotion path
+        } else if (!all_numeric && dt == first_dtype) {
+            // exact-match path for non-numeric types
+        } else {
+            rval.m_status = STATUS_CLEAR;
+            return rval;
+        }
+    }
+
+    rval.m_type = all_numeric ? DTYPE_FLOAT64 : first_dtype;
+
+    // Pass 2: return the first valid, non-none scalar. During the type-
+    // validation pass all inputs are STATUS_INVALID sentinels, so this
+    // loop falls through and returns rval with the resolved dtype and
+    // STATUS_INVALID, which the validator accepts.
+    for (auto i = 0; i < inputs.size(); ++i) {
+        const t_tscalar& val = inputs[i];
+        if (val.is_valid() && !val.is_none()) {
+            if (all_numeric) {
+                rval.set(val.to_double());
+            } else {
+                rval.set(val);
+            }
+            return rval;
+        }
+    }
+
+    return rval;
+}
+
 diff3::diff3() : exprtk::igeneric_function<t_tscalar>("VVV") {}
 
 diff3::~diff3() = default;
@@ -1782,6 +1806,11 @@ diff3::operator()(t_parameter_list parameters) {
     t_vector_view v1(parameters[0]);
     t_vector_view v2(parameters[1]);
     t_vector_view out(parameters[2]);
+
+    if (v1.size() < 3 || v2.size() < 3 || out.size() < 3) {
+        rval.m_status = STATUS_CLEAR;
+        return rval;
+    }
 
     t_tscalar o1;
     o1.set(v1[0] - v2[0]);
@@ -1810,6 +1839,10 @@ norm3::operator()(t_parameter_list parameters) {
     rval.clear();
     rval.m_type = DTYPE_FLOAT64;
     t_vector_view v1(parameters[0]);
+    if (v1.size() < 3) {
+        rval.m_status = STATUS_CLEAR;
+        return rval;
+    }
     double a = v1[0].to_double();
     double b = v1[1].to_double();
     double c = v1[2].to_double();
@@ -1832,6 +1865,11 @@ cross_product3::operator()(t_parameter_list parameters) {
     t_vector_view v1(parameters[0]);
     t_vector_view v2(parameters[1]);
     t_vector_view out(parameters[2]);
+
+    if (v1.size() < 3 || v2.size() < 3 || out.size() < 3) {
+        rval.m_status = STATUS_CLEAR;
+        return rval;
+    }
 
     // a2 * b3 - a3 * b2
     t_tscalar o1;
@@ -1866,6 +1904,11 @@ dot_product3::operator()(t_parameter_list parameters) {
     // Parameters already validated
     t_vector_view v1(parameters[0]);
     t_vector_view v2(parameters[1]);
+
+    if (v1.size() < 3 || v2.size() < 3) {
+        rval.m_status = STATUS_CLEAR;
+        return rval;
+    }
 
     rval.set(v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2]);
     return rval;
@@ -2209,12 +2252,12 @@ make_datetime::operator()(t_parameter_list parameters) {
 
 index::index(
     const t_gstate::t_mapping& pkey_map,
-    std::shared_ptr<t_data_table> source_table,
+    const std::shared_ptr<t_data_table>& source_table,
     t_uindex& row_idx
 ) :
     exprtk::igeneric_function<t_tscalar>("Z"),
     m_pkey_map(pkey_map),
-    m_source_table(std::move(std::move(source_table))),
+    m_source_table(source_table),
     m_row_idx(row_idx) {}
 
 index::~index() = default;
@@ -2234,13 +2277,13 @@ index::operator()(t_parameter_list parameters) {
 col::col(
     t_expression_vocab& expression_vocab,
     bool is_type_validator,
-    std::shared_ptr<t_data_table> source_table,
+    const std::shared_ptr<t_data_table>& source_table,
     t_uindex& row_idx
 ) :
     exprtk::igeneric_function<t_tscalar>("T"),
     m_expression_vocab(expression_vocab),
     m_is_type_validator(is_type_validator),
-    m_source_table(std::move(std::move(source_table))),
+    m_source_table(source_table),
     m_row_idx(row_idx) {}
 col::~col() = default;
 
@@ -2273,13 +2316,13 @@ col::operator()(t_parameter_list parameters) {
 vlookup::vlookup(
     t_expression_vocab& expression_vocab,
     bool is_type_validator,
-    std::shared_ptr<t_data_table> source_table,
+    const std::shared_ptr<t_data_table>& source_table,
     t_uindex& row_idx
 ) :
     exprtk::igeneric_function<t_tscalar>("TT"),
     m_expression_vocab(expression_vocab),
     m_is_type_validator(is_type_validator),
-    m_source_table(std::move(std::move(source_table))),
+    m_source_table(source_table),
     m_row_idx(row_idx) {}
 vlookup::~vlookup() = default;
 

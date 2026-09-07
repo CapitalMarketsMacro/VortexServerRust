@@ -12,7 +12,7 @@
 
 [package]
 name = "perspective-server"
-version = "4.3.0"
+version = "5.3.1"
 authors = ["Andrew Stein <steinlink@gmail.com>"]
 edition = "2024"
 description = "A data visualization and analytics component, especially well-suited for large and/or streaming datasets."
@@ -35,20 +35,24 @@ include = [
 ]
 
 [features]
+# No default features: the upstream `python` default (PSP_PYTHON_BUILD +
+# PSP_PARALLEL_FOR) is not wanted for the embedded Rust server, and
+# `wasm-exceptions` is Emscripten-only. This crate is Conan-only (see build.rs).
 default = []
 external-cpp = []
 disable-cpp = []
+# Build protoc from source via the `protobuf-src` crate instead of using the
+# Conan-provided protoc. Off by default so nothing compiles from source.
 bundled-protoc = ["protobuf-src"]
 
 [build-dependencies]
-cmake = "0.1.50"
-num_cpus = "^1.15.0"
+cmake = "0.1.58"
 shlex = "1.3.0"
 protobuf-src = { version = "2.1.1", optional = true }
 which = "7"
 
 [dependencies]
-perspective-client = { version = "4.4.0", path = "../perspective-client" }
+perspective-client = { version = "5.3.1", path = "../perspective-client" }
 
 # Key order is frequently implicitly relied upon in dynamic languages, so for
 # convenience we try to provide this (as well as explicit metadata calls).

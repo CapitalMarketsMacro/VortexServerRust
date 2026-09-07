@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <unordered_map>
 #include <perspective/base.h>
 #include <perspective/compat.h>
 #include <perspective/extract_aggregate.h>
@@ -86,9 +87,29 @@ t_stree::t_stree(
     m_aggspecs(aggspecs),
     m_schema(std::move(schema)),
     m_cur_aggidx(1),
-    m_has_delta(false) {
+    m_has_delta(false),
+    m_num_row_pivots_in_tree(pivots.size()) {
     const auto& g_agg_str = cfg.get_grand_agg_str();
     m_grand_agg_str = g_agg_str.empty() ? "Grand Aggregate" : g_agg_str;
+}
+
+void
+t_stree::set_gmv_row_pivot_meta(
+    t_uindex num_row_pivots_in_tree,
+    const std::string& next_row_pivot_name
+) {
+    m_num_row_pivots_in_tree = num_row_pivots_in_tree;
+    m_next_row_pivot_name = next_row_pivot_name;
+}
+
+t_uindex
+t_stree::get_num_row_pivots_in_tree() const {
+    return m_num_row_pivots_in_tree;
+}
+
+const std::string&
+t_stree::get_next_row_pivot_name() const {
+    return m_next_row_pivot_name;
 }
 
 t_stree::~t_stree() {
@@ -877,12 +898,6 @@ t_stree::update_shape_from_static(const t_dtree_ctx& ctx) {
         if (iter == m_nodes->get<by_pidx_hash>().end()) {
             // create node and enqueue
             sptidx = genidx();
-            t_uindex aggsize = m_aggregates->size();
-            if (sptidx == aggsize) {
-                double scale = 1.3;
-                t_uindex new_size = scale * aggsize;
-                m_aggregates->extend(new_size);
-            }
 
             t_uindex dst_ridx = gen_aggidx();
 
@@ -1105,7 +1120,7 @@ t_stree::gen_aggidx() {
     t_uindex rval = m_cur_aggidx;
     ++m_cur_aggidx;
     if (rval >= cur_cap) {
-        double nrows = ceil(.3 * double(rval));
+        double nrows = ceil(1.3 * double(rval));
         m_aggregates->extend(static_cast<t_uindex>(nrows));
     }
 
@@ -1222,6 +1237,11 @@ t_stree::update_agg_table(
             } break;
             case AGGTYPE_WEIGHTED_MEAN: {
                 auto pkeys = get_pkeys(nidx);
+
+                if (spec.get_dependencies().size() < 2) {
+                    dst->set_valid(dst_ridx, false);
+                    break;
+                }
 
                 double nr = 0;
                 double dr = 0;
@@ -1603,6 +1623,11 @@ t_stree::update_agg_table(
                     break;
                 }
 
+                if (spec.get_dependencies().size() < 2) {
+                    dst->set_scalar(dst_ridx, new_value);
+                    break;
+                }
+
                 std::vector<t_tscalar> values;
                 read_column_from_gstate(
                     gstate,
@@ -1654,6 +1679,11 @@ t_stree::update_agg_table(
                 old_value.set(dst_scalar);
                 auto pkeys = get_pkeys(nidx);
                 if (pkeys.empty()) {
+                    dst->set_scalar(dst_ridx, new_value);
+                    break;
+                }
+
+                if (spec.get_dependencies().size() < 2) {
                     dst->set_scalar(dst_ridx, new_value);
                     break;
                 }
@@ -1819,6 +1849,131 @@ t_stree::update_agg_table(
                         }
                     )
                 );
+                dst->set_scalar(dst_ridx, new_value);
+            } break;
+            case AGGTYPE_GMV: {
+                // The user-facing rule is "leaf = sum, parent = sum over
+                // immediate row children of |raw sum of child subtree|".
+                // Under split_by this is complicated by t_ctx2 sharding
+                // the data across several t_stree instances — see
+                // [t_stree::set_gmv_row_pivot_meta] for the metadata that
+                // distinguishes "the next pivot in this tree is a row
+                // pivot" from "the next missing row pivot lives in the
+                // gstate".
+                old_value.set(dst->get_scalar(dst_ridx));
+                const auto& col_name = spec.get_dependencies()[0].name();
+                const auto dst_dtype = dst->get_dtype();
+                const auto k_tree = m_num_row_pivots_in_tree;
+                const auto& next_row_pivot = m_next_row_pivot_name;
+                const bool has_missing_row_pivot = !next_row_pivot.empty();
+                const auto depth = get_depth(nidx);
+
+                auto sum_reducer =
+                    [dst_dtype](std::vector<t_tscalar>& values) -> t_tscalar {
+                    if (values.empty()) {
+                        return mknone();
+                    }
+                    t_tscalar v;
+                    v.set(std::uint64_t(0));
+                    v.m_type = dst_dtype;
+                    for (const auto& x : values) {
+                        if (x.is_nan()) {
+                            continue;
+                        }
+                        v = v.add(x.coerce_numeric_dtype(dst_dtype));
+                    }
+                    return v;
+                };
+
+                // row_path_len = min(depth, k_tree). A node is a "row-leaf"
+                // iff there are no row pivots missing from this tree AND
+                // all row pivots are consumed at this node's depth — i.e.
+                // depth >= k_tree.
+                const bool is_row_leaf =
+                    !has_missing_row_pivot && depth >= k_tree;
+
+                if (is_row_leaf) {
+                    auto pkeys = get_pkeys(nidx);
+                    new_value.set(
+                        reduce_from_gstate<std::function<
+                            t_tscalar(std::vector<t_tscalar>&)>>(
+                            gstate,
+                            expression_master_table,
+                            col_name,
+                            pkeys,
+                            sum_reducer
+                        )
+                    );
+                } else if (depth < k_tree) {
+                    // Row-parent and this tree's next pivot is the next
+                    // row pivot. Tree children at depth+1 are the
+                    // immediate row children — use them directly.
+                    t_tscalar rval;
+                    rval.set(std::uint64_t(0));
+                    rval.m_type = dst_dtype;
+                    for (auto cidx : get_child_idx(nidx)) {
+                        auto cpkeys = get_pkeys(cidx);
+                        t_tscalar csum = reduce_from_gstate<std::function<
+                            t_tscalar(std::vector<t_tscalar>&)>>(
+                            gstate,
+                            expression_master_table,
+                            col_name,
+                            cpkeys,
+                            sum_reducer
+                        );
+                        if (csum.is_valid() && !csum.is_nan()) {
+                            rval = rval.add(csum.abs());
+                        }
+                    }
+                    new_value.set(rval);
+                } else {
+                    // Row-parent but this tree's pivots beyond `depth`
+                    // (if any) are column pivots, so the immediate row
+                    // children aren't tree children. Read the missing
+                    // row pivot column for this node's pkeys, partition
+                    // by it, sum each partition, sum |partition_sum|.
+                    auto pkeys = get_pkeys(nidx);
+                    std::vector<t_tscalar> pivot_vals;
+                    std::vector<t_tscalar> data_vals;
+                    read_column_from_gstate(
+                        gstate,
+                        expression_master_table,
+                        next_row_pivot,
+                        pkeys,
+                        pivot_vals
+                    );
+                    read_column_from_gstate(
+                        gstate,
+                        expression_master_table,
+                        col_name,
+                        pkeys,
+                        data_vals
+                    );
+
+                    std::unordered_map<t_tscalar, t_tscalar> partials;
+                    for (std::size_t i = 0;
+                         i < pivot_vals.size() && i < data_vals.size();
+                         ++i) {
+                        const auto& x = data_vals[i];
+                        if (!x.is_valid() || x.is_nan()) {
+                            continue;
+                        }
+                        auto& acc = partials[pivot_vals[i]];
+                        if (!acc.is_valid()) {
+                            acc.set(std::uint64_t(0));
+                            acc.m_type = dst_dtype;
+                        }
+                        acc = acc.add(x.coerce_numeric_dtype(dst_dtype));
+                    }
+
+                    t_tscalar rval;
+                    rval.set(std::uint64_t(0));
+                    rval.m_type = dst_dtype;
+                    for (const auto& kv : partials) {
+                        rval = rval.add(kv.second.abs());
+                    }
+                    new_value.set(rval);
+                }
                 dst->set_scalar(dst_ridx, new_value);
             } break;
             case AGGTYPE_MUL: {
@@ -2525,23 +2680,20 @@ t_stree::first_last_helper(
         return std::make_pair(mknone(), mknone());
     }
 
+    const auto& deps = spec.get_dependencies();
+    if (deps.size() < 2) {
+        return std::make_pair(mknone(), mknone());
+    }
+
     std::vector<t_tscalar> values;
     std::vector<t_tscalar> sort_values;
 
     read_column_from_gstate(
-        gstate,
-        expression_master_table,
-        spec.get_dependencies()[0].name(),
-        pkeys,
-        values
+        gstate, expression_master_table, deps[0].name(), pkeys, values
     );
 
     read_column_from_gstate(
-        gstate,
-        expression_master_table,
-        spec.get_dependencies()[1].name(),
-        pkeys,
-        sort_values
+        gstate, expression_master_table, deps[1].name(), pkeys, sort_values
     );
 
     auto minmax_idx = get_minmax_idx(sort_values, spec.get_sort_type());

@@ -1,1 +1,83 @@
- 
+<br/>
+
+# Perspective ExprTK Extensions
+
+- `var ${1:x := 1}` Declare a new local variable
+- `abs(${1:x})` Absolute value of x
+- `avg(${1:x})` Average of all inputs
+- `bucket(${1:x}, ${2:y})` Bucket x by y
+- `ceil(${1:x})` Smallest integer >= x
+- `exp(${1:x})` Natural exponent of x (e ^ x)
+- `floor(${1:x})` Largest integer <= x
+- `frac(${1:x})` Fractional portion (after the decimal) of x
+- `iclamp(${1:x})` Inverse clamp x within a range
+- `inrange(${1:x})` Returns whether x is within a range
+- `log(${1:x})` Natural log of x
+- `log10(${1:x})` Base 10 log of x
+- `log1p(${1:x})` Natural log of 1 + x where x is very small
+- `log2(${1:x})` Base 2 log of x
+- `logn(${1:x}, ${2:N})` Base N log of x where N >= 0
+- `max(${1:x})` Maximum value of all inputs
+- `min(${1:x})` Minimum value of all inputs
+- `mul(${1:x})` Product of all inputs
+- `percent_of(${1:x})` Percent y of x
+- `pow(${1:x}, ${2:y})` x to the power of y
+- `root(${1:x}, ${2:N})` N-th root of x where N >= 0
+- `round(${1:x})` Round x to the nearest integer
+- `sgn(${1:x})` Sign of x: -1, 1, or 0
+- `sqrt(${1:x})` Square root of x
+- `sum(${1:x})` Sum of all inputs
+- `trunc(${1:x})` Integer portion of x
+- `acos(${1:x})` Arc cosine of x in radians
+- `acosh(${1:x})` Inverse hyperbolic cosine of x in radians
+- `asin(${1:x})` Arc sine of x in radians
+- `asinh(${1:x})` Inverse hyperbolic sine of x in radians
+- `atan(${1:x})` Arc tangent of x in radians
+- `atanh(${1:x})` Inverse hyperbolic tangent of x in radians
+- `cos(${1:x})` Cosine of x
+- `cosh(${1:x})` Hyperbolic cosine of x
+- `cot(${1:x})` Cotangent of x
+- `sin(${1:x})` Sine of x
+- `sinc(${1:x})` Sine cardinal of x
+- `sinh(${1:x})` Hyperbolic sine of x
+- `tan(${1:x})` Tangent of x
+- `tanh(${1:x})` Hyperbolic tangent of x
+- `deg2rad(${1:x})` Convert x from degrees to radians
+- `deg2grad(${1:x})` Convert x from degrees to gradians
+- `rad2deg(${1:x})` Convert x from radians to degrees
+- `grad2deg(${1:x})` Convert x from gradians to degrees
+- `concat(${1:x}, ${2:y})` Concatenate string columns and string literals, such as: concat("State" ', ', "City")
+- `order(${1:input column}, ${2:value}, ...)` Generates a sort order for a string column based on the input order of the parameters, such as: order("State", 'Texas', 'New York')
+- `upper(${1:x})` Uppercase of x
+- `lower(${1:x})` Lowercase of x
+- `hour_of_day(${1:x})` Return a datetime's hour of the day as a string
+- `month_of_year(${1:x})` Return a datetime's month of the year as a string
+- `day_of_week(${1:x})` Return a datetime's day of week as a string
+- `now()` The current datetime in local time
+- `today()` The current date in local time
+- `is_null(${1:x})` Whether x is a null value
+- `is_not_null(${1:x})` Whether x is not a null value
+- `coalesce(${1:x}, ${2:y})` Returns the first non-null argument.
+- `contains(${1:x}, ${2:'substr'})` Whether the string column or value contains the literal substring.
+- `not(${1:x})` not x
+- `true` Boolean value true
+- `false` Boolean value false
+- `if (${1:condition}) {} else if (${2:condition}) {} else {}` An if/else conditional, which evaluates a condition such as:  if ("Sales" > 100) { true } else { false }
+- `for (${1:expression}) {}` A for loop, which repeatedly evaluates an incrementing expression such as: var x := 0; var y := 1; for (x < 10; x += 1) { y := x + y }
+- `string(${1:x})` Converts the given argument to a string
+- `integer(${1:x})` Converts the given argument to a 32-bit integer. If the result over/under-flows, null is returned
+- `float(${1:x})` Converts the argument to a float
+- `date(${1:year}, ${1:month}, ${1:day})` Given a year, month (1-12) and day, create a new date
+- `datetime(${1:timestamp})` Given a POSIX timestamp of milliseconds since epoch, create a new datetime
+- `boolean(${1:x})` Converts the given argument to a boolean
+- `random()` Returns a random float between 0 and 1, inclusive.
+- `match(${1:string}, ${2:pattern})` Returns True if any part of string matches pattern, and False otherwise.
+- `match_all(${1:string}, ${2:pattern})` Returns True if the whole string matches pattern, and False otherwise.
+- `search(${1:string}, ${2:pattern})` Returns the substring that matches the first capturing group in pattern, or null if there are no capturing groups in the pattern or if there are no matches.
+- `indexof(${1:string}, ${2:pattern}, ${3:output_vector})` Writes into index 0 and 1 of output_vector the start and end indices of the substring that matches the first capturing group in pattern.  Returns true if there is a match and output was written, or false if there are no capturing groups in the pattern, if there are no matches, or if the indices are invalid.
+- `substring(${1:string}, ${2:start_idx}, ${3:length})` Returns a substring of string from start_idx with the given length. If length is not passed in, returns substring from start_idx to the end of the string. Returns null if the string or any indices are invalid.
+- `replace(${1:string}, ${2:pattern}, ${3:replacer})` Replaces the first match of pattern in string with replacer, or return the original string if no replaces were made.
+- `replace_all(${1:string}, ${2:pattern}, ${3:replacer})` Replaces all non-overlapping matches of pattern in string with replacer, or return the original string if no replaces were made.
+- `index()` Looks up the index value of the current row
+- `col(${1:string})` Looks up a column value by name
+- `vlookup(${1:string}, ${2:uint64})` Looks up a value in another column by index

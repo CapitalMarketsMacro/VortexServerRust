@@ -48,6 +48,7 @@ else()
 endif()
 
 option(PSP_WASM64 "Enable WASM Memory64 support" OFF)
+option(PSP_WASM_OPFS "Enable on-disk (OPFS) tables in the browser via the custom `psp_opfs_*` bridge in `perspective-server.poly.ts` (NO_FILESYSTEM + JSPI; no WasmFS, no SharedArrayBuffer). Backwards compatible: the module loads and runs in-memory tables on non-JSPI browsers; on-disk activates only in a JSPI-capable Worker." ON)
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
     set(WIN32 ON)
@@ -143,8 +144,15 @@ else()
 endif()
 
 if(DEFINED ENV{PSP_USE_CCACHE})
-    set(CMAKE_C_COMPILE_LAUNCHER ccache)
-    set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+    # `PSP_CCACHE_BINARY` selects an alternate launcher (CI uses `sccache`
+    # on Windows, where MSVC support in ccache is unreliable)
+    if(DEFINED ENV{PSP_CCACHE_BINARY})
+        set(CMAKE_C_COMPILER_LAUNCHER $ENV{PSP_CCACHE_BINARY})
+        set(CMAKE_CXX_COMPILER_LAUNCHER $ENV{PSP_CCACHE_BINARY})
+    else()
+        set(CMAKE_C_COMPILER_LAUNCHER ccache)
+        set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+    endif()
 endif()
 
 if(NOT DEFINED PSP_CPP_BUILD)
@@ -205,6 +213,9 @@ string(TOLOWER "${CMAKE_BUILD_TYPE}" CMAKE_BUILD_TYPE_LOWER)
 if(CMAKE_BUILD_TYPE_LOWER STREQUAL debug)
     set(BUILD_MESSAGE "${BUILD_MESSAGE}\n${Red}Building DEBUG${ColorReset}")
     add_definitions(-DPSP_DEBUG)
+    add_definitions(-DPSP_STORAGE_VERIFY)
+    add_definitions(-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_FAST)
+    add_definitions(-D_GLIBCXX_ASSERTIONS)
 else()
     set(BUILD_MESSAGE "${BUILD_MESSAGE}\n${Cyan}Building RELEASE${ColorReset}")
 endif()
@@ -221,6 +232,10 @@ if(PSP_PYTHON_BUILD AND MACOS)
     # don't link against build python
     # https://blog.tim-smith.us/2015/09/python-extension-modules-os-x/
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -undefined dynamic_lookup")
+endif()
+
+if(EMSCRIPTEN)
+    set(CMAKE_HAVE_LIBC_PTHREAD TRUE CACHE BOOL "psp: satisfy FindThreads on WASM without enabling pthreads" FORCE)
 endif()
 
 # ######################
@@ -275,6 +290,7 @@ if(PSP_WASM_BUILD)
             -mbulk-memory \
             -msimd128 \
             -mrelaxed-simd \
+            -fopenmp-simd \
             -flto \
             --emit-tsd=perspective-server.d.ts \
         ")
@@ -383,6 +399,12 @@ if(PSP_PYODIDE)
     string(APPEND CMAKE_CXX_FLAGS " -fexceptions")
 endif()
 
+if(PSP_WASM_BUILD AND NOT CMAKE_BUILD_TYPE_LOWER STREQUAL debug)
+    set(PSP_DEP_SIMD_FLAGS " -flto -mbulk-memory -msimd128 -mrelaxed-simd ")
+    string(APPEND CMAKE_C_FLAGS "${PSP_DEP_SIMD_FLAGS}")
+    string(APPEND CMAKE_CXX_FLAGS "${PSP_DEP_SIMD_FLAGS}")
+endif()
+
 # ############################
 # DEPENDENCY RESOLUTION      #
 # ############################
@@ -447,6 +469,16 @@ if(PSP_USE_CONAN AND NOT PSP_WASM_BUILD)
     add_subdirectory(${PSP_CMAKE_MODULE_PATH}/../cpp/protos "${CMAKE_BINARY_DIR}/protos-build")
 else()
     # === ExternalProject path (WASM/Emscripten builds or no Conan) ===
+    # Kept for upstream parity only. This fork ships without the
+    # ExternalProject templates (cmake/*.txt.in, cmake/re2/, env.js), so make
+    # the failure explicit instead of a confusing configure_file() error.
+    if(NOT EXISTS "${PSP_CMAKE_MODULE_PATH}/arrow.txt.in")
+        message(FATAL_ERROR
+            "Non-Conan and Emscripten/WASM builds are not supported in this fork: "
+            "the ExternalProject templates were removed. Configure with the Conan "
+            "toolchain (CMAKE_TOOLCHAIN_FILE=<conan generators>/conan_toolchain.cmake, "
+            "as build.rs does) and PSP_WASM_BUILD=0.")
+    endif()
     psp_build_message("${Cyan}Using ExternalProject for dependency resolution${ColorReset}")
 
     set(all_deps_INCLUDE_DIRS "")
@@ -510,6 +542,7 @@ set(SOURCE_FILES
     ${PSP_CPP_SRC}/src/cpp/aggspec.cpp
     ${PSP_CPP_SRC}/src/cpp/arg_sort.cpp
     ${PSP_CPP_SRC}/src/cpp/arrow_loader.cpp
+    ${PSP_CPP_SRC}/src/cpp/arrow_normalize.cpp
     ${PSP_CPP_SRC}/src/cpp/arrow_writer.cpp
     ${PSP_CPP_SRC}/src/cpp/base.cpp
     ${PSP_CPP_SRC}/src/cpp/base_impl_linux.cpp
@@ -528,6 +561,7 @@ set(SOURCE_FILES
     ${PSP_CPP_SRC}/src/cpp/compat_impl_wasm.cpp
     ${PSP_CPP_SRC}/src/cpp/compat_impl_win.cpp
     ${PSP_CPP_SRC}/src/cpp/computed_expression.cpp
+    ${PSP_CPP_SRC}/src/cpp/window.cpp
     ${PSP_CPP_SRC}/src/cpp/computed_function.cpp
     ${PSP_CPP_SRC}/src/cpp/config.cpp
     ${PSP_CPP_SRC}/src/cpp/context_base.cpp
@@ -551,6 +585,7 @@ set(SOURCE_FILES
     ${PSP_CPP_SRC}/src/cpp/filter.cpp
     ${PSP_CPP_SRC}/src/cpp/flat_traversal.cpp
     ${PSP_CPP_SRC}/src/cpp/get_data_extents.cpp
+    ${PSP_CPP_SRC}/src/cpp/json_loader.cpp
     ${PSP_CPP_SRC}/src/cpp/gnode.cpp
     ${PSP_CPP_SRC}/src/cpp/gnode_state.cpp
     ${PSP_CPP_SRC}/src/cpp/mask.cpp
@@ -576,10 +611,12 @@ set(SOURCE_FILES
     ${PSP_CPP_SRC}/src/cpp/sort_specification.cpp
     ${PSP_CPP_SRC}/src/cpp/sparse_tree.cpp
     ${PSP_CPP_SRC}/src/cpp/sparse_tree_node.cpp
+    ${PSP_CPP_SRC}/src/cpp/residency.cpp
     ${PSP_CPP_SRC}/src/cpp/step_delta.cpp
     ${PSP_CPP_SRC}/src/cpp/storage.cpp
     ${PSP_CPP_SRC}/src/cpp/storage_impl_linux.cpp
     ${PSP_CPP_SRC}/src/cpp/storage_impl_osx.cpp
+    ${PSP_CPP_SRC}/src/cpp/storage_impl_wasm.cpp
     ${PSP_CPP_SRC}/src/cpp/storage_impl_win.cpp
     ${PSP_CPP_SRC}/src/cpp/sym_table.cpp
     ${PSP_CPP_SRC}/src/cpp/table.cpp
@@ -593,6 +630,7 @@ set(SOURCE_FILES
     ${PSP_CPP_SRC}/src/cpp/view_config.cpp
     ${PSP_CPP_SRC}/src/cpp/vocab.cpp
     ${PSP_CPP_SRC}/src/cpp/arrow_csv.cpp
+    ${PSP_CPP_SRC}/src/cpp/join_engine.cpp
     ${PSP_CPP_SRC}/src/cpp/server.cpp
     ${PSP_CPP_SRC}/src/cpp/binding_api.cpp
 )
@@ -627,6 +665,9 @@ set(PSP_EXPORTED_FUNCTIONS
     _psp_is_memory64
     _psp_num_cpus
     _psp_set_num_cpus
+    _psp_residency_prepare
+    _psp_residency_victim_fname
+    _psp_residency_commit
 )
 
 if(PSP_HEAP_INSTRUMENTS)
@@ -649,10 +690,19 @@ if(PSP_PYODIDE)
 else()
 # -s MEMORY_GROWTH_GEOMETRIC_STEP=1.0 \
 # -s MEMORY_GROWTH_GEOMETRIC_CAP=536870912 \
+
+    set(PSP_FILESYSTEM_FLAGS "-s NO_FILESYSTEM=1 ")
+    set(PSP_CLOSURE_FLAGS "--closure=1 ")
+
+    # On-disk tables in the browser are backed by OPFS via emscripten's WasmFS.
+    if(PSP_WASM_OPFS)
+        add_compile_definitions(PSP_WASM_OPFS_PERSIST=1)
+    endif()
+
     set(PSP_WASM_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} \
         --no-entry \
-        --closure=1 \
-        -s NO_FILESYSTEM=1 \
+        ${PSP_CLOSURE_FLAGS} \
+        ${PSP_FILESYSTEM_FLAGS} \
         -s ALLOW_MEMORY_GROWTH=1 \
         -s MODULARIZE=1 \
         -s WASM_BIGINT=1 \

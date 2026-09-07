@@ -113,6 +113,9 @@ t_lstore::resize_mapping(t_uindex cap_new) {
 
 void
 t_lstore::destroy_mapping() {
+    if (m_base == nullptr) {
+        return; // already evicted
+    }
     t_index rc = munmap(m_base, capacity());
     PSP_VERBOSE_ASSERT(rc, == 0, "Failed to destroy mapping");
 }

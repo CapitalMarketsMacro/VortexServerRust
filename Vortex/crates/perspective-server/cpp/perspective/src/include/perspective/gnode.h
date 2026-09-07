@@ -93,7 +93,11 @@ public:
      * @param input_schema
      * @param output_schema
      */
-    t_gnode(t_schema input_schema, t_schema output_schema);
+    t_gnode(
+        t_schema input_schema,
+        t_schema output_schema,
+        t_backing_store backing_store = BACKING_STORE_MEMORY
+    );
     ~t_gnode();
 
     void init();
@@ -107,6 +111,21 @@ public:
      * @param fragments
      */
     void send(t_uindex port_id, const t_data_table& fragments);
+
+    /**
+     * @brief Bulk-initialize an empty gnode directly from `data_table`,
+     * bypassing the input port, `flatten()`, and `update_master_table()`
+     * pipeline.
+     *
+     * The caller must guarantee that (a) the gnode's gstate is empty,
+     * (b) all rows are `OP_INSERT`, and (c) `psp_pkey` contains no
+     * duplicates (e.g. an implicit row-index primary key). Columns of
+     * `data_table` are aliased into the master table instead of being
+     * copied.
+     *
+     * @param data_table
+     */
+    void init_bulk(const std::shared_ptr<t_data_table>& data_table);
 
     /**
      * @brief Given a port_id, call `process_table` on the port's data table,
@@ -158,6 +177,7 @@ public:
     t_data_table* get_table();
 
     std::shared_ptr<t_data_table> get_table_sptr() const;
+    std::shared_ptr<t_data_table> get_pkeyed_table() const;
 
     t_data_table* _get_otable(t_uindex port_id);
     t_data_table* _get_itable(t_uindex port_id);
@@ -253,7 +273,8 @@ protected:
     void update_context_from_state(
         CTX_T* ctx,
         const std::string& name,
-        std::shared_ptr<t_data_table> flattened
+        std::shared_ptr<t_data_table> flattened,
+        bool is_registration
     );
 
     /**
@@ -358,6 +379,21 @@ protected:
         const std::shared_ptr<t_data_table>& flattened
     );
 
+    /**
+     * @brief The window widening pass (WINDOW_FUNCTIONS_PLAN §2.3): apply
+     * the update batch to every registered context's window indexes, then
+     * append a synthesized "unchanged" row to `flattened` and the
+     * transitional port tables for each row OUTSIDE the batch whose window
+     * outputs may change. The ordinary pipeline then reports those rows'
+     * window deltas, and its per-row prev/current diffing suppresses the
+     * over-approximation. Must run after `m_gstate` is updated and before
+     * `_compute_expressions`.
+     */
+    void _process_windows(
+        const std::shared_ptr<t_data_table>& flattened,
+        const std::vector<t_rlookup>& lookup
+    );
+
 private:
     /**
      * @brief Process the input data table by flattening it, calculating
@@ -393,6 +429,7 @@ private:
     std::vector<std::shared_ptr<t_port>> m_oports;
     tsl::ordered_map<std::string, t_ctx_handle> m_contexts;
     std::shared_ptr<t_gstate> m_gstate;
+    t_backing_store m_backing_store;
 
     std::chrono::high_resolution_clock::time_point m_epoch;
     std::function<void()> m_pool_cleanup;
@@ -438,10 +475,10 @@ t_gnode::notify_context(
 
     ctx->step_begin();
 
-    if (ctx->num_expressions() > 0) {
+    if (ctx->has_derived_columns()) {
         // Join expression tables on the context with gnode tables and pass
-        // those into the context so there is no distinction between expression
-        // and real columns for the context.
+        // those into the context so there is no distinction between
+        // expression/window and real columns for the context.
         std::shared_ptr<t_expression_tables> ctx_expression_tables =
             ctx->get_expression_tables();
 
@@ -483,7 +520,10 @@ t_gnode::notify_context(
 template <typename CTX_T>
 void
 t_gnode::update_context_from_state(
-    CTX_T* ctx, const std::string& name, std::shared_ptr<t_data_table> flattened
+    CTX_T* ctx,
+    const std::string& name,
+    std::shared_ptr<t_data_table> flattened,
+    bool is_registration
 ) {
     PSP_TRACE_SENTINEL();
     PSP_VERBOSE_ASSERT(m_init, "touching uninited object");
@@ -502,21 +542,26 @@ t_gnode::update_context_from_state(
     //
     // 1. when a new context is created and it needs to get the current state
     //  of the gstate master table in order to calculate aggregates, etc.
+    //  `is_registration` is `true` in this case — no subscriber can observe
+    //  deltas populated during this initial notify, so we skip populating
+    //  `m_delta_pkeys` to save O(N) allocations.
     //
     // 2. when a table created from schema (0 rows) gets data and now needs
-    //  to update its registered contexts with the new data.
-    if (ctx->num_expressions() > 0) {
-        // If the context has expression columns, it has already been computed
-        // in `process_table` and we can join the "real" and expression columns
-        // together and pass it to the context.
+    //  to update its registered contexts with the new data. `is_registration`
+    //  is `false` here — a subscriber may have attached between context
+    //  creation and the first update, and expects to see all rows as deltas.
+    if (ctx->has_derived_columns()) {
+        // If the context has expression or window columns, they have already
+        // been computed in `process_table` and we can join the "real" and
+        // derived columns together and pass it to the context.
         std::shared_ptr<t_expression_tables> ctx_expression_tables =
             ctx->get_expression_tables();
         std::shared_ptr<t_data_table> joined_flattened =
             flattened->join(ctx_expression_tables->m_flattened);
-        ctx->notify(*joined_flattened);
+        ctx->notify(*joined_flattened, is_registration);
     } else {
         // Just use the table from the gnode
-        ctx->notify(*flattened);
+        ctx->notify(*flattened, is_registration);
     }
 
     ctx->step_end();
@@ -583,9 +628,25 @@ t_gnode::_process_column(
                     prev_pkey_eq
                 );
 
-                dcolumn->set_nth<DATA_T>(
-                    added_count, cur_valid ? cur_value - prev_value : DATA_T(0)
-                );
+                // Mirrors `t_gstate::update_master_column`: an invalid cell
+                // is an explicit null if CLEAR (removes this row's
+                // contribution from additive aggregates), and a no-op if
+                // INVALID (column omitted from a partial update). A slot's
+                // raw bits are unspecified when its validity flag is false,
+                // so only the valid side of a transition may be read (#1256).
+                DATA_T delta_value;
+                if (cur_valid) {
+                    delta_value =
+                        cur_value - (prev_valid ? prev_value : DATA_T(0));
+                } else if (fcolumn->is_cleared(idx) && prev_valid) {
+                    SUPPRESS_WARNINGS_VC(4146)
+                    delta_value = -prev_value;
+                    RESTORE_WARNINGS_VC()
+                } else {
+                    delta_value = DATA_T(0);
+                }
+
+                dcolumn->set_nth<DATA_T>(added_count, delta_value);
                 dcolumn->set_valid(added_count, true);
 
                 pcolumn->set_nth<DATA_T>(added_count, prev_value);
@@ -613,7 +674,9 @@ t_gnode::_process_column(
                     ccolumn->set_valid(added_count, prev_valid);
 
                     SUPPRESS_WARNINGS_VC(4146)
-                    dcolumn->set_nth<DATA_T>(added_count, -prev_value);
+                    dcolumn->set_nth<DATA_T>(
+                        added_count, prev_valid ? -prev_value : DATA_T(0)
+                    );
                     RESTORE_WARNINGS_VC()
                     dcolumn->set_valid(added_count, true);
 

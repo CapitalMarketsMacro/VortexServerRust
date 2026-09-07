@@ -20,6 +20,7 @@ use super::aggregates::*;
 use super::expressions::*;
 use super::filters::*;
 use super::sort::*;
+use super::windows::*;
 use crate::proto;
 use crate::proto::columns_update;
 
@@ -66,6 +67,49 @@ impl From<GroupRollupMode> for proto::GroupRollupMode {
     }
 }
 
+/// The `split_by` corollary to [`GroupRollupMode`]. `Flat` (the default,
+/// matching this crate's historical behavior) emits only full-depth split
+/// combinations as columns; `Rollup` additionally emits grand-total and
+/// subtotal column groups in "totals before" order. There is no `Total`
+/// variant - an empty `split_by` already expresses a single grand-total
+/// column group.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, TS)]
+pub enum SplitRollupMode {
+    #[default]
+    #[serde(rename = "flat")]
+    Flat,
+
+    #[serde(rename = "rollup")]
+    Rollup,
+}
+
+impl Display for SplitRollupMode {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        write!(fmt, "{}", match self {
+            Self::Flat => "Flat",
+            Self::Rollup => "Rollup",
+        })
+    }
+}
+
+impl From<proto::SplitRollupMode> for SplitRollupMode {
+    fn from(value: proto::SplitRollupMode) -> Self {
+        match value {
+            proto::SplitRollupMode::Flat => Self::Flat,
+            proto::SplitRollupMode::Rollup => Self::Rollup,
+        }
+    }
+}
+
+impl From<SplitRollupMode> for proto::SplitRollupMode {
+    fn from(value: SplitRollupMode) -> Self {
+        match value {
+            SplitRollupMode::Flat => proto::SplitRollupMode::Flat,
+            SplitRollupMode::Rollup => proto::SplitRollupMode::Rollup,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Default, PartialEq, Serialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct ViewConfig {
@@ -85,12 +129,19 @@ pub struct ViewConfig {
     #[serde(default)]
     pub group_rollup_mode: GroupRollupMode,
 
+    #[serde(default)]
+    pub split_rollup_mode: SplitRollupMode,
+
     #[serde(skip_serializing_if = "is_default_value")]
     #[serde(default)]
     pub filter_op: FilterReducer,
 
     #[serde(default)]
     pub expressions: Expressions,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_default_value")]
+    pub windows: Windows,
 
     #[serde(default)]
     pub columns: Vec<Option<String>>,
@@ -172,6 +223,12 @@ pub struct ViewConfigUpdate {
     /// name and a string sort direction. When `column-pivots` are applied,
     /// the additional sort directions `"col asc"` and `"col desc"` will
     /// determine the order of pivot columns groups.
+    ///
+    /// `sort` is the ONLY thing that orders a `View`'s rows — without it
+    /// they keep the `Table`'s natural (insertion) order, which any
+    /// consumer reading rows sequentially will reflect. Not to be
+    /// confused with a window column's `order_by`, which orders rows
+    /// WITHIN a window frame and does not reorder the `View`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     #[ts(optional)]
@@ -187,6 +244,16 @@ pub struct ViewConfigUpdate {
     #[ts(optional)]
     pub expressions: Option<Expressions>,
 
+    /// The `windows` property declares ordered, partitioned rolling
+    /// computations (moving aggregates, cumulative sums) as _new_ columns
+    /// keyed by output alias (`{"name": {...spec}}`, symmetric with
+    /// `expressions`), analogous to SQL window functions. See
+    /// [`crate::config::WindowSpec`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[ts(optional)]
+    pub windows: Option<Windows>,
+
     /// Aggregates perform a calculation over an entire column, and are
     /// displayed when one or more [Group By](#group-by) are applied to the
     /// `View`. Aggregates can be specified by the user, or Perspective will
@@ -198,6 +265,13 @@ pub struct ViewConfigUpdate {
     /// Perspective provides a selection of aggregate functions that can be
     /// applied to columns in the `View` constructor using a dictionary of
     /// column name to aggregate function name.
+    ///
+    /// An aggregate also determines the column's RESULT TYPE, which need
+    /// not match the input: `"count"` yields an `integer` whatever it
+    /// counts, so a `date` column left on the default `"count"` is an
+    /// `integer` in the resulting `View` — no longer a date. Set an
+    /// aggregate that preserves the type (e.g. `"any"`, `"last"`) when
+    /// the original type matters, such as a date used as a chart axis.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     #[ts(optional)]
@@ -217,6 +291,11 @@ pub struct ViewConfigUpdate {
     #[serde(default)]
     #[ts(optional)]
     pub group_rollup_mode: Option<GroupRollupMode>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[ts(optional)]
+    pub split_rollup_mode: Option<SplitRollupMode>,
 }
 
 impl From<ViewConfigUpdate> for proto::ViewConfig {
@@ -248,6 +327,13 @@ impl From<ViewConfigUpdate> for proto::ViewConfig {
                 .map(|x| x.into())
                 .collect(),
             expressions: value.expressions.unwrap_or_default().0,
+            windows: value
+                .windows
+                .unwrap_or_default()
+                .0
+                .into_iter()
+                .map(|(k, v)| (k, v.into()))
+                .collect(),
             aggregates: value
                 .aggregates
                 .unwrap_or_default()
@@ -258,6 +344,9 @@ impl From<ViewConfigUpdate> for proto::ViewConfig {
             group_rollup_mode: value
                 .group_rollup_mode
                 .map(|x| proto::GroupRollupMode::from(x).into()),
+            split_rollup_mode: value
+                .split_rollup_mode
+                .map(|x| proto::SplitRollupMode::from(x).into()),
         }
     }
 }
@@ -290,9 +379,11 @@ impl From<ViewConfig> for ViewConfigUpdate {
             filter_op: Some(value.filter_op),
             sort: Some(value.sort),
             expressions: Some(value.expressions),
+            windows: Some(value.windows),
             aggregates: Some(value.aggregates),
             group_by_depth: value.group_by_depth,
             group_rollup_mode: Some(value.group_rollup_mode),
+            split_rollup_mode: Some(value.split_rollup_mode),
         }
     }
 }
@@ -316,6 +407,13 @@ impl From<proto::ViewConfig> for ViewConfig {
                 .into(),
             sort: value.sort.into_iter().map(|x| x.into()).collect(),
             expressions: Expressions(value.expressions),
+            windows: Windows(
+                value
+                    .windows
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into()))
+                    .collect(),
+            ),
             aggregates: value
                 .aggregates
                 .into_iter()
@@ -325,6 +423,12 @@ impl From<proto::ViewConfig> for ViewConfig {
             group_rollup_mode: value
                 .group_rollup_mode
                 .map(proto::GroupRollupMode::try_from)
+                .and_then(|x| x.ok())
+                .map(|x| x.into())
+                .unwrap_or_default(),
+            split_rollup_mode: value
+                .split_rollup_mode
+                .map(proto::SplitRollupMode::try_from)
                 .and_then(|x| x.ok())
                 .map(|x| x.into())
                 .unwrap_or_default(),
@@ -342,9 +446,11 @@ impl From<ViewConfigUpdate> for ViewConfig {
             filter_op: value.filter_op.unwrap_or_default(),
             sort: value.sort.unwrap_or_default(),
             expressions: value.expressions.unwrap_or_default(),
+            windows: value.windows.unwrap_or_default(),
             aggregates: value.aggregates.unwrap_or_default(),
             group_by_depth: value.group_by_depth,
             group_rollup_mode: value.group_rollup_mode.unwrap_or_default(),
+            split_rollup_mode: value.split_rollup_mode.unwrap_or_default(),
         }
     }
 }
@@ -368,6 +474,13 @@ impl From<proto::ViewConfig> for ViewConfigUpdate {
             ),
             sort: Some(value.sort.into_iter().map(|x| x.into()).collect()),
             expressions: Some(Expressions(value.expressions)),
+            windows: Some(Windows(
+                value
+                    .windows
+                    .into_iter()
+                    .map(|(k, v)| (k, v.into()))
+                    .collect(),
+            )),
             aggregates: Some(
                 value
                     .aggregates
@@ -379,6 +492,10 @@ impl From<proto::ViewConfig> for ViewConfigUpdate {
             group_rollup_mode: value
                 .group_rollup_mode
                 .and_then(|x| proto::GroupRollupMode::try_from(x).ok())
+                .map(|x| x.into()),
+            split_rollup_mode: value
+                .split_rollup_mode
+                .and_then(|x| proto::SplitRollupMode::try_from(x).ok())
                 .map(|x| x.into()),
         }
     }
@@ -434,7 +551,9 @@ impl ViewConfig {
         changed = Self::_apply(&mut self.sort, update.sort) || changed;
         changed = Self::_apply(&mut self.aggregates, update.aggregates) || changed;
         changed = Self::_apply(&mut self.expressions, update.expressions) || changed;
+        changed = Self::_apply(&mut self.windows, update.windows) || changed;
         changed = Self::_apply(&mut self.group_rollup_mode, update.group_rollup_mode) || changed;
+        changed = Self::_apply(&mut self.split_rollup_mode, update.split_rollup_mode) || changed;
         if self.group_rollup_mode == GroupRollupMode::Total && !self.group_by.is_empty() {
             tracing::info!("`total` incompatible with `group_by`");
             changed = true;

@@ -172,7 +172,13 @@ jobs:
       # args to ln. Using the runner default (pwsh on Windows, bash on
       # Linux) keeps the MSVC env from ilammy/msvc-dev-cmd intact.
       - name: Build vortex-server (release)
-        run: cargo build --release -p vortex-server --target ${{ matrix.target }}
+        env:
+          # The Verify step above already warmed ~/.conan2, so build.rs's
+          # hermetic cache-only stage must succeed; forbid its remote fallback
+          # so any divergence fails here instead of downloading (or, with
+          # PSP_CONAN_BUILD_MISSING, source-building) anything.
+          PSP_CONAN_NO_REMOTE: '1'
+        run: cargo build --release --locked -p vortex-server --target ${{ matrix.target }}
 
       - name: Upload binary
         uses: actions/upload-artifact@v4

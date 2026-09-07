@@ -1029,12 +1029,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hermit-abi"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
-
-[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1563,16 +1557,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num_cpus"
-version = "1.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
-dependencies = [
- "hermit-abi",
- "libc",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1671,7 +1655,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perspective"
-version = "4.3.0"
+version = "5.3.1"
 dependencies = [
  "async-lock",
  "axum",
@@ -1700,11 +1684,12 @@ dependencies = [
 
 [[package]]
 name = "perspective-client"
-version = "4.4.0"
+version = "5.3.1"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "arrow-select",
  "async-lock",
  "futures",
  "getrandom 0.4.2",
@@ -1728,14 +1713,13 @@ dependencies = [
 
 [[package]]
 name = "perspective-server"
-version = "4.3.0"
+version = "5.3.1"
 dependencies = [
  "async-lock",
  "cmake",
  "futures",
  "indexmap",
  "link-cplusplus",
- "num_cpus",
  "perspective-client",
  "prost",
  "protobuf-src",
@@ -1911,7 +1895,8 @@ dependencies = [
 [[package]]
 name = "protobuf-src"
 version = "2.1.1+27.1"
-source = "git+https://github.com/carlocorradini/rust-protobuf-native.git?rev=1aba500e469f8bdc384a0fe9e69c189fda72e059#1aba500e469f8bdc384a0fe9e69c189fda72e059"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6217c3504da19b85a3a4b2e9a5183d635822d83507ba0986624b5c05b83bfc40"
 dependencies = [
  "cmake",
 ]
@@ -2896,6 +2881,7 @@ version = "11.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4994acea2522cd2b3b85c1d9529a55991e3ad5e25cdcd3de9d505972c4379424"
 dependencies = [
+ "indexmap",
  "serde_json",
  "thiserror 2.0.18",
  "ts-rs-macros",

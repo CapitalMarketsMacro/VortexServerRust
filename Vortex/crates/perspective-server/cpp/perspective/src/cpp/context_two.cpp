@@ -77,6 +77,19 @@ t_ctx2::init() {
         );
 
         m_trees[treeidx]->init();
+
+        // Tell the tree how many of its `m_pivots` are row pivots and
+        // what the next missing row pivot is (if any). AGGTYPE_GMV uses
+        // this to roll up across row dimensions that aren't embedded in
+        // this particular tree — e.g. m_trees[0] has no row pivots, so
+        // a tree-leaf at e.g. [AAPL] needs to be partitioned by
+        // `row_pivots[0]` from the gstate to compute the gmv value.
+        const auto& row_pivots = m_config.get_row_pivots();
+        std::string next_row_pivot;
+        if (treeidx < row_pivots.size()) {
+            next_row_pivot = row_pivots[treeidx].colname();
+        }
+        m_trees[treeidx]->set_gmv_row_pivot_meta(treeidx, next_row_pivot);
     }
 
     m_rtraversal = std::make_shared<t_traversal>(rtree());
@@ -87,9 +100,23 @@ t_ctx2::init() {
     // `t_data_table`s so that each context's expressions are isolated
     // and do not affect other contexts when they are calculated.
     const auto& expressions = m_config.get_expressions();
-    m_expression_tables = std::make_shared<t_expression_tables>(expressions);
+    m_expression_tables = std::make_shared<t_expression_tables>(
+        expressions, m_config.get_backing_store(), m_config.get_windows()
+    );
+    m_window_engine =
+        std::make_shared<t_window_engine>(m_config.get_windows());
 
     m_init = true;
+}
+
+std::shared_ptr<t_window_engine>
+t_ctx2::get_window_engine() const {
+    return m_window_engine;
+}
+
+bool
+t_ctx2::has_derived_columns() const {
+    return m_expression_tables->m_master->get_schema().size() > 0;
 }
 
 t_uindex
@@ -247,11 +274,11 @@ t_ctx2::get_min_max(const std::string& colname) const {
     std::vector<const t_column*> aggcols(ntrees * n_aggs);
     for (t_uindex treeidx = 0; treeidx < ntrees; ++treeidx) {
         auto* aggtable = m_trees[treeidx]->get_aggtable();
-        t_schema aggschema = aggtable->get_schema();
         for (t_uindex aggidx = 0; aggidx < t_uindex(n_aggs); ++aggidx) {
-            const std::string& aggname = aggschema.m_columns[aggidx];
+            // resolve by column index (== aggidx); skips the name->index map
+            // lookup + temp string and the schema deep-copy.
             aggcols[treeidx * n_aggs + aggidx] =
-                aggtable->_get_const_column(aggname);
+                aggtable->_get_const_column(aggidx);
         }
     }
 
@@ -333,12 +360,11 @@ t_ctx2::get_data(
 
     for (t_uindex treeidx = 0; treeidx < ntrees; ++treeidx) {
         auto* aggtable = m_trees[treeidx]->get_aggtable();
-        t_schema aggschema = aggtable->get_schema();
-
         for (t_uindex aggidx = 0; aggidx < naggs; ++aggidx) {
-            const std::string& aggname = aggschema.m_columns[aggidx];
+            // resolve by column index (== aggidx); skips the per-iteration
+            // name->index map lookup + temp string and the schema deep-copy.
             aggcols[treeidx * naggs + aggidx] =
-                aggtable->_get_const_column(aggname);
+                aggtable->_get_const_column(aggidx);
         }
     }
 
@@ -397,7 +423,8 @@ t_ctx2::get_data(const std::vector<t_uindex>& rows) const {
 
     // Perspective generates extra headers for columns in the sort, which
     // needs to be skipped when generating row deltas.
-    bool should_skip_column_headers = !m_sortby.empty() && start_col < end_col;
+    bool should_skip_column_headers = !m_sortby.empty()
+        && !m_config.is_split_rollup() && start_col < end_col;
 
     if (should_skip_column_headers) {
         auto depth = m_config.get_num_cpivots();
@@ -434,12 +461,11 @@ t_ctx2::get_data(const std::vector<t_uindex>& rows) const {
 
     for (t_uindex treeidx = 0; treeidx < ntrees; ++treeidx) {
         auto* aggtable = m_trees[treeidx]->get_aggtable();
-        t_schema aggschema = aggtable->get_schema();
-
         for (t_uindex aggidx = 0; aggidx < naggs; ++aggidx) {
-            const std::string& aggname = aggschema.m_columns[aggidx];
+            // resolve by column index (== aggidx); skips the per-iteration
+            // name->index map lookup + temp string and the schema deep-copy.
             aggcols[treeidx * naggs + aggidx] =
-                aggtable->_get_const_column(aggname);
+                aggtable->_get_const_column(aggidx);
         }
     }
 
@@ -509,7 +535,7 @@ t_ctx2::reset_sortby() {
 }
 
 void
-t_ctx2::notify(const t_data_table& flattened) {
+t_ctx2::notify(const t_data_table& flattened, bool /* is_registration */) {
     for (t_uindex tree_idx = 0, loop_end = m_trees.size(); tree_idx < loop_end;
          ++tree_idx) {
         if (is_rtree_idx(tree_idx) != 0U) {
@@ -553,7 +579,8 @@ t_ctx2::notify(const t_data_table& flattened) {
             );
         }
     }
-    if (!m_sortby.empty()) {
+
+    if (!m_sortby.empty() && !m_leaves_only && !m_total_only) {
         sort_by(m_sortby);
     }
 
@@ -631,7 +658,8 @@ t_ctx2::notify(
         }
     }
 
-    if (!m_sortby.empty()) {
+    // See the single-argument `notify` overload.
+    if (!m_sortby.empty() && !m_leaves_only && !m_total_only) {
         sort_by(m_sortby);
     }
 
@@ -1118,6 +1146,9 @@ t_ctx2::get_rows_changed() {
     t_uindex ncols = get_num_view_columns();
     std::vector<t_uindex> rows;
     std::vector<std::pair<t_uindex, t_uindex>> cells;
+    if (ncols > 1) {
+        cells.reserve(nrows * (ncols - 1));
+    }
 
     // get cells and imbue with additional information
     for (t_uindex ridx = 0; ridx < nrows; ++ridx) {
@@ -1128,6 +1159,10 @@ t_ctx2::get_rows_changed() {
 
     auto cells_info = resolve_cells(cells);
 
+    // Cells are visited in row-major order and `resolve_cells` preserves it, so
+    // `m_ridx` is non-decreasing across `cells_info`. Tracking the last appended
+    // row dedups in O(1) with no allocation and leaves `rows` already ascending,
+    // replacing both the old O(n^2) `std::find` and the trailing `std::sort`.
     for (const auto& c : cells_info) {
         if (c.m_idx < 0) {
             continue;
@@ -1135,14 +1170,12 @@ t_ctx2::get_rows_changed() {
         const auto& deltas = m_trees[c.m_treenum]->get_deltas();
         auto iterators = deltas->get<by_tc_nidx_aggidx>().equal_range(c.m_idx);
         auto ridx = c.m_ridx;
-        bool unique_ridx =
-            std::find(rows.begin(), rows.end(), ridx) == rows.end();
-        if ((iterators.first != iterators.second) && unique_ridx) {
+        bool has_delta = iterators.first != iterators.second;
+        if (has_delta && (rows.empty() || rows.back() != ridx)) {
             rows.push_back(ridx);
         }
     }
 
-    std::sort(rows.begin(), rows.end());
     return rows;
 }
 
@@ -1171,6 +1204,15 @@ t_ctx2::reset(bool reset_expressions) {
         );
         m_trees[treeidx]->init();
         m_trees[treeidx]->set_deltas_enabled(get_feature_state(CTX_FEAT_DELTA));
+
+        // See [t_ctx2::init] — gmv needs to know how many row pivots
+        // this particular tree carries vs. what's still in the gstate.
+        const auto& row_pivots = m_config.get_row_pivots();
+        std::string next_row_pivot;
+        if (treeidx < row_pivots.size()) {
+            next_row_pivot = row_pivots[treeidx].colname();
+        }
+        m_trees[treeidx]->set_gmv_row_pivot_meta(treeidx, next_row_pivot);
     }
 
     m_rtraversal = std::make_shared<t_traversal>(rtree());
@@ -1290,6 +1332,10 @@ t_ctx2::compute_expressions(
             regex_mapping
         );
     }
+
+    // Windows read expression-alias sources from the master expression
+    // table, so they must compute after the expression loop.
+    m_window_engine->compute_master(master, pkey_map, master_expression_table);
 }
 
 void
@@ -1366,6 +1412,21 @@ t_ctx2::compute_expressions(
             regex_mapping
         );
     }
+
+    // Windows must compute after the expression loop (expression-alias
+    // sources) and before `calculate_transitions` (which diffs the window
+    // columns of `m_prev`/`m_current` like any other column).
+    m_window_engine->compute_update(
+        master,
+        pkey_map,
+        m_expression_tables->m_master,
+        m_expression_tables->m_flattened,
+        m_expression_tables->m_prev,
+        m_expression_tables->m_current,
+        m_expression_tables->m_delta,
+        flattened,
+        existed
+    );
 
     // Calculate the transitions now that the intermediate tables are computed
     m_expression_tables->calculate_transitions(existed);

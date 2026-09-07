@@ -19,14 +19,16 @@
 //! A simple example which loads an [Apache Arrow](https://arrow.apache.org/) and
 //! computes a "Group By" operation, returning a new Arrow.
 //!
-//! ```rust
-//! use perspective::LocalClient;
+//! ```rust,no_run
 //! use perspective::client::config::ViewConfigUpdate;
 //! use perspective::client::{TableInitOptions, UpdateData, ViewWindow};
-//! use perspective::server::Server;
+//! use perspective::server::{LocalClient, Server};
 //!
-//! # let arow_vec_data: Vec<u8> = vec![];
-//! let data = UpdateData::Arrow(arrow_vec_data);
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let server = Server::new(None);
+//! let client = LocalClient::new(&server);
+//! let arrow_data: Vec<u8> = vec![];
+//! let data = UpdateData::Arrow(arrow_data.into());
 //! let options = TableInitOptions::default();
 //! let table = client.table(data.into(), options).await?;
 //! let mut view_config = ViewConfigUpdate::default();
@@ -37,6 +39,8 @@
 //!
 //! let view = table.view(Some(view_config)).await?;
 //! let arrow = view.to_arrow(ViewWindow::default()).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # See also
@@ -57,5 +61,6 @@ pub mod axum;
 #[cfg(feature = "axum-ws")]
 pub mod virtual_server;
 
+pub use perspective_client as client;
 pub use perspective_client::proto;
-pub use {perspective_client as client, perspective_server as server};
+pub use perspective_server as server;

@@ -5,7 +5,7 @@ Self-contained C++ engine + Rust bindings for [Perspective](https://perspective.
 ## Prerequisites
 
 - **Rust** (nightly) — installed via `rust-toolchain.toml`
-- **CMake** 3.18+
+- **CMake** 3.20+ (the Conan branch uses `cmake_path`)
 - **C++ compiler** (MSVC on Windows, GCC/Clang on Linux/macOS)
 - **Conan** 2.x — `pip install conan`
 
@@ -24,7 +24,7 @@ The script will:
 2. Download pre-built C++ dependencies via Conan (pinned by `crates/perspective-server/conan.lock`)
 3. Build the C++ engine and Rust crates
 
-First build takes ~5-10 min on the supported toolchains (gcc 13 / MSVC 2022 / apple-clang 17), where Conan downloads pre-built binaries rather than compiling them; other toolchains source-compile the C++ deps and take longer. Subsequent builds reuse the cache.
+First build takes ~5-10 min on the supported toolchains (gcc 13 / MSVC 2022; apple-clang 17 partially), where Conan downloads pre-built binaries rather than compiling them. On any other toolchain the build fails with `Missing binary` unless `PSP_CONAN_BUILD_MISSING=1` opts in to compiling the C++ deps from source (much slower). Subsequent builds reuse the cache and need no network at all.
 
 ## Usage
 
@@ -36,10 +36,12 @@ use perspective::client::{TableInitOptions, UpdateData};
 
 let server = Server::new(None);
 let client = server.new_local_client();
-let csv = "name,value\nAlpha,100\nBeta,200".to_string();
+// CSV is compiled out of this build (the pre-built Arrow has no CSV module);
+// use JSON rows / JSON columns / NDJSON / Arrow IPC instead.
+let rows = r#"[{"name":"Alpha","value":100},{"name":"Beta","value":200}]"#.to_string();
 let mut opts = TableInitOptions::default();
 opts.set_name("my_table");
-client.table(UpdateData::Csv(csv).into(), opts).await?;
+client.table(UpdateData::JsonRows(rows).into(), opts).await?;
 ```
 
 ## Project Structure

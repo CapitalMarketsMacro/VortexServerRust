@@ -12,7 +12,7 @@
 
 [package]
 name = "perspective"
-version = "4.3.0"
+version = "5.3.1"
 authors = ["Andrew Stein <steinlink@gmail.com>"]
 edition = "2024"
 description = "A data visualization and analytics component, especially well-suited for large and/or streaming datasets."
@@ -23,7 +23,6 @@ keywords = []
 include = ["src/**/*", "tests/**/*", "Cargo.toml"]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 
@@ -38,8 +37,8 @@ external-cpp = [
 
 [dependencies]
 async-lock = "2.5.0"
-perspective-client = { version = "4.4.0", path = "../perspective-client" }
-perspective-server = { version = "4.3.0", path = "../perspective-server" }
+perspective-client = { version = "5.3.1", path = "../perspective-client" }
+perspective-server = { version = "5.3.1", path = "../perspective-server" }
 tracing = { version = ">=0.1.36" }
 axum = { version = ">=0.7,<0.9", features = ["ws"], optional = true }
 fallible-iterator = "0.2.0"

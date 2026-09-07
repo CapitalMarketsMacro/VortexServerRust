@@ -1,6 +1,11 @@
 set(DEFAULT_PROTOBUF_VERSION "33.5")
 
 option(PSP_PROTOC_PATH "Path to the protoc binary" "")
+option(PSP_PROTOC_NO_DOWNLOAD "Fail instead of downloading protoc from GitHub when none is found" OFF)
+
+# find_program() caches its result; with always_configure a protobuf bump would
+# otherwise keep using the protoc found on a previous configure.
+unset(Protobuf_EXECUTABLE CACHE)
 
 # Function to download and extract protoc
 function(download_protoc VERSION DESTINATION)
@@ -52,7 +57,13 @@ if(NOT Protobuf_EXECUTABLE)
 endif()
 
 if(NOT Protobuf_EXECUTABLE)
-    message(STATUS "Protobuf_EXECUTABLE not found, searching for protoc")
+    if(PSP_PROTOC_NO_DOWNLOAD)
+        message(FATAL_ERROR
+            "No usable protoc found (PSP_PROTOC_PATH=${PSP_PROTOC_PATH}) and "
+            "PSP_PROTOC_NO_DOWNLOAD is set (PSP_CONAN_NO_REMOTE=1). The Conan protobuf "
+            "package normally provides it; check the Conan install output.")
+    endif()
+    message(STATUS "Protobuf_EXECUTABLE not found, downloading protoc ${DEFAULT_PROTOBUF_VERSION}")
     download_protoc(${DEFAULT_PROTOBUF_VERSION} ${CMAKE_BINARY_DIR}/protoc-release)
     set(PROTOC_EXECUTABLE ${CMAKE_BINARY_DIR}/protoc-release/bin/protoc)
     # find_program(PROTOC_EXECUTABLE NAMES protoc)
