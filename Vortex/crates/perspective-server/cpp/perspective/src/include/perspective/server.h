@@ -14,6 +14,7 @@
 
 #include "perspective/base.h"
 #include "perspective/exports.h"
+#include "perspective/join_engine.h"
 #include "perspective/raw_types.h"
 #include "perspective/schema.h"
 #include "perspective/view.h"
@@ -158,7 +159,8 @@ namespace server {
             t_uindex start_col,
             t_uindex end_col,
             bool emit_group_by = true,
-            bool compress = true
+            bool compress = true,
+            bool emit_legacy_row_path_names = true
         ) const = 0;
 
         [[nodiscard]]
@@ -290,10 +292,11 @@ namespace server {
             t_uindex start_col,
             t_uindex end_col,
             bool emit_group_by = true,
-            bool compress = true
+            bool compress = true,
+            bool emit_legacy_row_path_names = true
         ) const override {
             return m_view->to_arrow(
-                start_row, end_row, start_col, end_col, emit_group_by, compress
+                start_row, end_row, start_col, end_col, emit_group_by, compress, emit_legacy_row_path_names
             );
         }
 
@@ -653,6 +656,10 @@ namespace server {
         handle_request(std::uint32_t client_id, const std::string_view& data);
         std::vector<ProtoServerResp<std::string>> poll();
 
+        std::size_t residency_prepare();
+        const char* residency_victim_fname(std::size_t i);
+        void residency_commit();
+
     private:
         void handle_process_table(
             const Request& req,
@@ -682,6 +689,7 @@ namespace server {
             m_cpu_time_start;
         std::atomic<long long> m_cpu_time;
         ServerResources m_resources;
+        JoinEngine m_join_engine;
         t_computed_expression_parser m_computed_expression_parser;
     };
 

@@ -10,55 +10,58 @@ use std::process::Command;
 
 use cmake::Config;
 
-/// Find the protoc binary. Checks in order:
-/// 1. Conan output directory (version-matched protoc)
-/// 2. PROTOC env var
-/// 3. protobuf-src crate (if bundled-protoc feature enabled)
-/// 4. System PATH
-fn find_protoc() -> PathBuf {
-    if let Some(p) = find_protoc_from_conan() {
-        println!("cargo:warning=Using protoc from Conan: {}", p.display());
-        return p;
-    }
+/// The protobuf major version Conan provides, read from `conanfile.py`
+/// (`protobuf/6.33.5` -> "33"). `protoc --version` reports the same number
+/// (`libprotoc 33.5`), so this is what every protoc candidate is compared
+/// against: generated `perspective.pb.h` hard-fails to compile against a
+/// libprotobuf of a different version, so a stray PATH protoc must never win.
+fn expected_protoc_major() -> Option<String> {
+    let conanfile = fs::read_to_string("conanfile.py").ok()?;
+    let re_start = conanfile.find("\"protobuf/")?;
+    let rest = &conanfile[re_start + "\"protobuf/".len()..];
+    // "6.33.5\")" -> skip the leading "6." -> "33"
+    let rest = rest.strip_prefix("6.")?;
+    let major: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if major.is_empty() { None } else { Some(major) }
+}
 
-    if let Ok(protoc) = std::env::var("PROTOC") {
-        let p = PathBuf::from(&protoc);
-        if p.exists() {
-            println!("cargo:warning=Using PROTOC from environment: {protoc}");
-            return p;
+/// Check that a protoc binary runs (pre-built protoc may need a newer glibc
+/// on old Linux) AND reports the protobuf major version Conan provides.
+fn protoc_works(path: &Path) -> bool {
+    let Ok(out) = Command::new(path).arg("--version").output() else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let version = String::from_utf8_lossy(&out.stdout);
+    let reported = version
+        .trim()
+        .strip_prefix("libprotoc ")
+        .map(|v| v.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+        .unwrap_or_default();
+    match expected_protoc_major() {
+        Some(expected) if reported != expected => {
+            println!(
+                "cargo:warning=Ignoring protoc {} ({}): Conan protobuf is {}.x",
+                path.display(),
+                version.trim(),
+                expected
+            );
+            false
         }
-    }
-
-    #[cfg(feature = "bundled-protoc")]
-    {
-        let p = protobuf_src::protoc();
-        println!("cargo:warning=Using bundled protoc: {}", p.display());
-        return p;
-    }
-
-    #[allow(unreachable_code)]
-    {
-        if let Ok(p) = which::which("protoc") {
-            println!("cargo:warning=Using system protoc: {}", p.display());
-            return p;
-        }
-        panic!(
-            "protoc not found. Either:\n\
-             - Set PROTOC env var to the protoc binary path\n\
-             - Install protoc (e.g. via Conan, chocolatey, or apt)\n\
-             - Enable the 'bundled-protoc' feature to build from source"
-        );
+        _ => true,
     }
 }
 
-/// Check if a protoc binary actually works (not just exists).
-/// On older Linux systems, pre-built protoc may require newer glibc.
-fn protoc_works(path: &Path) -> bool {
-    Command::new(path)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// `PSP_CONAN_NO_REMOTE=1` — strict offline build: no Conan remote, no protoc
+/// download; anything missing from the local caches is a hard error.
+fn strict_offline() -> bool {
+    println!("cargo:rerun-if-env-changed=PSP_CONAN_NO_REMOTE");
+    matches!(
+        std::env::var("PSP_CONAN_NO_REMOTE").as_deref(),
+        Ok("1") | Ok("true")
+    )
 }
 
 /// Find protoc optionally — returns None if not found or not working.
@@ -95,7 +98,11 @@ fn find_protoc_optional() -> Option<PathBuf> {
                 return Some(p);
             }
         }
-        println!("cargo:warning=No working protoc found — CMake will download it");
+        if strict_offline() {
+            println!("cargo:warning=No usable protoc found and PSP_CONAN_NO_REMOTE is set");
+        } else {
+            println!("cargo:warning=No usable protoc found — CMake will download it");
+        }
         None
     }
 }
@@ -242,49 +249,104 @@ fn conan_install(manifest_dir: &Path) -> PathBuf {
     let profile_path = profiles_dir.join(profile);
 
     let conan_output_dir = manifest_dir.join("conan_output");
+    // Conan's CMakeDeps never removes generator files for packages that left
+    // the graph; start clean so the *.cmake scan in `link_conan_libraries`
+    // and the `*-data.cmake` GLOB in CMakeLists.txt only ever see the
+    // current graph. `conan install` writes generators only after the graph
+    // resolved, so a failed stage leaves nothing behind.
+    let _ = fs::remove_dir_all(&conan_output_dir);
     fs::create_dir_all(&conan_output_dir).ok();
 
-    println!("cargo:warning=Running conan install with profile {profile} ...");
-
-    let mut cmd = Command::new("conan");
-    cmd.arg("install")
-        .arg(manifest_dir)
-        .arg("--output-folder")
-        .arg(&conan_output_dir)
-        // --build=missing builds only what has no pre-built binary. On the
-        // supported target profiles (Linux gcc 13, Windows msvc 194, macOS
-        // apple-clang 17) the lockfile below pins a dependency set that is
-        // 100% pre-built on ConanCenter, so nothing compiles from source.
-        // On any other toolchain this gracefully falls back to a source
-        // build instead of failing.
-        .arg("--build=missing");
-
-    // Pin the exact, all-pre-built dependency graph (recipe revisions +
-    // package ids) so a newer ConanCenter recipe revision can never
-    // silently flip a dependency back to a source build. Regenerate with:
-    //   conan lock create . --profile:all conan/profiles/<profile>
-    // accumulating each target profile into the same conan.lock.
+    // Pin the exact, all-pre-built dependency graph (recipe revisions) so a
+    // newer ConanCenter recipe revision can never silently change what gets
+    // resolved. See CLAUDE.md, "Updating the lockfile".
     let lockfile = manifest_dir.join("conan.lock");
-    if lockfile.exists() {
-        cmd.arg("--lockfile").arg(&lockfile);
-    }
 
-    if profile_path.exists() {
-        cmd.arg("--profile:host").arg(&profile_path);
-    } else {
-        println!(
-            "cargo:warning=Conan profile {} not found, using default profile",
-            profile_path.display()
-        );
-    }
+    // Two-stage install (see CLAUDE.md, "C++ dependencies: pre-built only"):
+    //
+    // 1. Hermetic: `--no-remote --build=never`. Resolves the whole graph from
+    //    the local Conan cache with zero network I/O and never compiles
+    //    anything. This is the steady state on every developer machine after
+    //    the first build and on CI runners with a restored ~/.conan2, and it
+    //    keeps builds working when ConanCenter is unreachable (e.g. behind a
+    //    TLS-intercepting corporate proxy). Fails fast if any binary is
+    //    missing — including tool_requires such as boost's `b2`, which Conan
+    //    otherwise insists on *checking* against the remote even though the
+    //    prebuilt boost never needs it.
+    // 2. Fallback: remotes enabled, still `--build=never`: downloads the
+    //    ConanCenter pre-built binaries the lockfile pins and fails loudly
+    //    ("Missing binary") on a toolchain with no published binaries instead
+    //    of silently source-building Arrow/boost/protobuf/openssl/thrift for
+    //    30+ minutes. `PSP_CONAN_BUILD_MISSING=1` opts in to `--build=missing`
+    //    for such toolchains.
+    //
+    // `PSP_CONAN_NO_REMOTE=1` forbids stage 2 entirely (strict offline builds).
+    let strict = strict_offline();
+    println!("cargo:rerun-if-env-changed=PSP_CONAN_BUILD_MISSING");
+    let build_missing = matches!(
+        std::env::var("PSP_CONAN_BUILD_MISSING").as_deref(),
+        Ok("1") | Ok("true")
+    );
 
-    let status = cmd
-        .status()
-        .expect("Failed to run conan — is it installed?");
+    let run = |stage: &str, extra: &[&str]| -> std::process::ExitStatus {
+        println!("cargo:warning=Running conan install ({stage}) with profile {profile} ...");
+        let mut cmd = Command::new("conan");
+        cmd.arg("install")
+            .arg(manifest_dir)
+            .arg("--output-folder")
+            .arg(&conan_output_dir)
+            .args(extra);
+
+        if lockfile.exists() {
+            cmd.arg("--lockfile").arg(&lockfile);
+        } else {
+            println!(
+                "cargo:warning=conan.lock not found at {} — dependency revisions are NOT pinned",
+                lockfile.display()
+            );
+        }
+
+        if profile_path.exists() {
+            cmd.arg("--profile:host").arg(&profile_path);
+        } else {
+            println!(
+                "cargo:warning=Conan profile {} not found, using default profile",
+                profile_path.display()
+            );
+        }
+
+        cmd.status()
+            .expect("Failed to run conan — is it installed?")
+    };
+
+    if run("cache-only", &["--no-remote", "--build=never"]).success() {
+        println!("cargo:warning=Conan install succeeded from local cache (no network)");
+        return conan_output_dir;
+    }
 
     assert!(
+        !strict,
+        "Conan install failed in cache-only mode and PSP_CONAN_NO_REMOTE=1 is set. Populate \
+         the Conan cache first: `conan install {} --profile:host {} --lockfile {} \
+         --build=never`, or unset PSP_CONAN_NO_REMOTE",
+        manifest_dir.display(),
+        profile_path.display(),
+        lockfile.display()
+    );
+
+    let build_flag = if build_missing { "--build=missing" } else { "--build=never" };
+    println!(
+        "cargo:warning=Local Conan cache incomplete; retrying with remotes enabled ({build_flag})"
+    );
+    let status = run("remote", &[build_flag]);
+    assert!(
         status.success(),
-        "Conan install failed with exit code {:?}",
+        "Conan install failed (remote stage) with exit code {:?}; see Conan's output above. \
+         `Missing binary` means the host compiler does not match the pre-built set (Linux \
+         gcc 13 / Windows msvc 194 / macOS apple-clang 17): realign the toolchain or update \
+         conan.lock, or set PSP_CONAN_BUILD_MISSING=1 to opt in to compiling the C++ deps \
+         from source. `CERTIFICATE_VERIFY_FAILED` behind a TLS-intercepting proxy: set \
+         `core.net.http:cacert_path` in ~/.conan2/global.conf (CLAUDE.md, 'Corporate TLS note')",
         status.code()
     );
 
@@ -317,8 +379,10 @@ fn cmake_build() -> Result<Option<PathBuf>, std::io::Error> {
     dst.define("RAPIDJSON_BUILD_EXAMPLES", "OFF");
     dst.define("ARROW_CXX_FLAGS_DEBUG", "-Wno-error");
 
-    // Find protoc if available — if not, CMake's FindProtoc.cmake
-    // will download it automatically from GitHub.
+    // Find protoc — normally the version-matched one from the Conan protobuf
+    // package. If nothing usable is found, CMake's FindProtoc.cmake downloads
+    // a release zip from GitHub, unless PSP_CONAN_NO_REMOTE=1, in which case
+    // that download is forbidden and configure fails with a clear message.
     if let Some(protoc_path) = find_protoc_optional() {
         dst.define(
             "PSP_PROTOC_PATH",
@@ -326,6 +390,9 @@ fn cmake_build() -> Result<Option<PathBuf>, std::io::Error> {
                 .parent()
                 .expect("protoc path returned root path or empty string"),
         );
+    }
+    if strict_offline() {
+        dst.define("PSP_PROTOC_NO_DOWNLOAD", "ON");
     }
     dst.define("CMAKE_COLOR_DIAGNOSTICS", "ON");
     dst.define(
@@ -396,9 +463,8 @@ fn cmake_build() -> Result<Option<PathBuf>, std::io::Error> {
         dst.env("PSP_DISABLE_CLANGD", "1");
     }
 
-    if !cfg!(windows) {
-        dst.build_arg(format!("-j{}", num_cpus::get()));
-    }
+    // Parallelism: cmake-rs already passes `--parallel $NUM_JOBS` (or hands
+    // the build cargo's jobserver on Unix Makefiles), so nothing to add here.
 
     if let Ok(cmake_args) = std::env::var("CMAKE_ARGS") {
         println!("cargo:warning=Setting CMAKE_ARGS from environment {cmake_args:?}");
@@ -450,8 +516,17 @@ fn cmake_link_deps(cmake_build_dir: &Path) -> Result<(), std::io::Error> {
         }
     }
 
-    println!("cargo:rerun-if-changed=cpp/perspective");
-    println!("cargo:rerun-if-changed=conanfile.py");
+    // Everything that feeds `conan install` or the CMake configure/build.
+    for path in [
+        "cpp/perspective",
+        "cpp/protos",
+        "cmake",
+        "conanfile.py",
+        "conan.lock",
+        "conan/profiles",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     Ok(())
 }
 

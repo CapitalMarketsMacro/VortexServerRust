@@ -25,15 +25,17 @@ mod internal {
         let server = perspective::server::Server::new(None);
         let client1 = LocalClient::new(&server);
         let client2 = LocalClient::new(&server);
+        // Local patch (VortexServer): JSON rows instead of CSV, because the
+        // ConanCenter pre-built Arrow is built with `with_csv=False` and CSV
+        // ingest is compiled out (see CLAUDE.md, "CSV support"); and
+        // `TableInitOptions::default()` instead of a struct literal, which
+        // upstream left stale after adding `page_to_disk` / `list_flatten`.
+        let mut options = TableInitOptions::default();
+        options.set_name("Table1");
         let table = client1
             .table(
-                UpdateData::Csv("x,y\n1,2\n3,4".to_owned()).into(),
-                TableInitOptions {
-                    name: Some("Table1".to_owned()),
-                    index: None,
-                    limit: None,
-                    format: None,
-                },
+                UpdateData::JsonRows(r#"[{"x":1,"y":2},{"x":3,"y":4}]"#.to_owned()).into(),
+                options,
             )
             .await?;
 
@@ -55,7 +57,7 @@ mod internal {
 
         table
             .update(
-                UpdateData::Csv("x,y\n5,6".to_owned()),
+                UpdateData::JsonRows(r#"[{"x":5,"y":6}]"#.to_owned()),
                 UpdateOptions::default(),
             )
             .await?;

@@ -54,7 +54,11 @@ t_ctx_grouped_pkey::init() {
     // `t_data_table`s so that each context's expressions are isolated
     // and do not affect other contexts when they are calculated.
     const auto& expressions = m_config.get_expressions();
-    m_expression_tables = std::make_shared<t_expression_tables>(expressions);
+    m_expression_tables = std::make_shared<t_expression_tables>(
+        expressions, m_config.get_backing_store(), m_config.get_windows()
+    );
+    m_window_engine =
+        std::make_shared<t_window_engine>(m_config.get_windows());
 
     m_init = true;
 }
@@ -150,12 +154,12 @@ t_ctx_grouped_pkey::get_data(
     }
 
     auto* aggtable = m_tree->get_aggtable();
-    t_schema aggschema = aggtable->get_schema();
 
     for (t_uindex aggidx = 0, loop_end = aggcols.size(); aggidx < loop_end;
          ++aggidx) {
-        const std::string& aggname = aggschema.m_columns[aggidx];
-        aggcols[aggidx] = aggtable->_get_const_column(aggname);
+        // resolve by column index (== aggidx); skips the per-iteration
+        // name->index map lookup + temp string and the schema deep-copy.
+        aggcols[aggidx] = aggtable->_get_const_column(aggidx);
     }
 
     const std::vector<t_aggspec>& aggspecs = m_config.get_aggregates();
@@ -676,7 +680,9 @@ t_ctx_grouped_pkey::pprint() const {
 }
 
 void
-t_ctx_grouped_pkey::notify(const t_data_table& flattened) {
+t_ctx_grouped_pkey::notify(
+    const t_data_table& flattened, bool /* is_registration */
+) {
     PSP_TRACE_SENTINEL();
     PSP_VERBOSE_ASSERT(m_init, "touching uninited object");
 
@@ -744,6 +750,10 @@ t_ctx_grouped_pkey::compute_expressions(
             regex_mapping
         );
     }
+
+    // Windows read expression-alias sources from the master expression
+    // table, so they must compute after the expression loop.
+    m_window_engine->compute_master(master, pkey_map, master_expression_table);
 }
 
 void
@@ -821,8 +831,33 @@ t_ctx_grouped_pkey::compute_expressions(
         );
     }
 
+    // Windows must compute after the expression loop (expression-alias
+    // sources) and before `calculate_transitions` (which diffs the window
+    // columns of `m_prev`/`m_current` like any other column).
+    m_window_engine->compute_update(
+        master,
+        pkey_map,
+        m_expression_tables->m_master,
+        m_expression_tables->m_flattened,
+        m_expression_tables->m_prev,
+        m_expression_tables->m_current,
+        m_expression_tables->m_delta,
+        flattened,
+        existed
+    );
+
     // Calculate the transitions now that the intermediate tables are computed
     m_expression_tables->calculate_transitions(existed);
+}
+
+std::shared_ptr<t_window_engine>
+t_ctx_grouped_pkey::get_window_engine() const {
+    return m_window_engine;
+}
+
+bool
+t_ctx_grouped_pkey::has_derived_columns() const {
+    return m_expression_tables->m_master->get_schema().size() > 0;
 }
 
 t_uindex

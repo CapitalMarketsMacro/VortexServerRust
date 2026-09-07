@@ -52,6 +52,8 @@ impl TableSlot {
         let mut opts = TableInitOptions::default();
         opts.set_name(&self.name);
         opts.index = self.config.perspective_index();
+        // Stored on the engine table, so it also governs every later update.
+        opts.list_flatten = Some(self.config.list_flatten.to_proto());
 
         let table = self
             .client
@@ -107,12 +109,22 @@ impl TableRegistry {
                     slot.name
                 ));
             }
+            if let Some(idx) = slot.config.index.as_deref() {
+                return Err(anyhow!(
+                    "table '{}' sets index `{}` but has no source — a static \
+                     table is created with an empty schema, so the index column \
+                     cannot exist; add an ingress source or remove `index`",
+                    slot.name,
+                    idx
+                ));
+            }
 
             tracing::info!(table = %slot.name, "creating static table");
 
             let mut opts = TableInitOptions::default();
             opts.set_name(&slot.name);
             opts.index = slot.config.perspective_index();
+            opts.list_flatten = Some(slot.config.list_flatten.to_proto());
 
             let table = slot
                 .client

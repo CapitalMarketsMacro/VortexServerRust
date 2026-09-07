@@ -19,6 +19,8 @@
 #include <perspective/gnode.h>
 #include <perspective/pool.h>
 #include <perspective/data_table.h>
+#include <perspective/arrow_normalize.h>
+#include <perspective/json_loader.h>
 
 namespace perspective {
 
@@ -53,7 +55,10 @@ public:
         std::vector<std::string> column_names,
         std::vector<t_dtype> data_types,
         std::uint32_t limit,
-        std::string index
+        std::string index,
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        apachearrow::t_list_flatten list_flatten =
+            apachearrow::LIST_FLATTEN_ZIP
     );
 
     /**
@@ -69,6 +74,26 @@ public:
         std::uint32_t row_count,
         const t_op op,
         const t_uindex port_id
+    );
+
+    /**
+     * @brief Fast-path `init` for the initial bulk load of an empty `Table`.
+     *
+     * Aliases `data_table`'s columns directly into the gnode's master table,
+     * skipping the input port append + `flatten()` copies that `init` would
+     * otherwise perform. Only valid when the gnode has not yet been created
+     * (no prior data) and the caller can guarantee that `psp_pkey` contains
+     * no duplicates -- e.g. `from_csv` with an implicit row-index pkey.
+     *
+     * Also skips the subsequent `pool->_process()` call, since nothing is
+     * queued on the input port.
+     *
+     * @param data_table
+     * @param row_count
+     */
+    void init_bulk(
+        const std::shared_ptr<t_data_table>& data_table,
+        std::uint32_t row_count
     );
 
     /**
@@ -187,6 +212,7 @@ public:
     std::uint32_t get_offset() const;
     std::uint32_t get_limit() const;
     const std::string& get_index() const;
+    t_backing_store get_backing_store() const;
 
     // Setters
     void set_column_names(const std::vector<std::string>& column_names);
@@ -205,37 +231,55 @@ public:
     static std::shared_ptr<Table> from_csv(
         const std::string& index,
         std::string&& data,
-        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max()
+        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max(),
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        apachearrow::t_list_flatten list_flatten =
+            apachearrow::LIST_FLATTEN_ZIP
     );
 
     static std::shared_ptr<Table> from_cols(
         const std::string& index,
         std::string&& data,
-        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max()
+        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max(),
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        apachearrow::t_list_flatten list_flatten =
+            apachearrow::LIST_FLATTEN_ZIP
     );
 
     static std::shared_ptr<Table> from_rows(
         const std::string& index,
         std::string&& data,
-        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max()
+        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max(),
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        apachearrow::t_list_flatten list_flatten =
+            apachearrow::LIST_FLATTEN_ZIP
     );
 
     static std::shared_ptr<Table> from_ndjson(
         const std::string& index,
         std::string&& data,
-        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max()
+        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max(),
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        apachearrow::t_list_flatten list_flatten =
+            apachearrow::LIST_FLATTEN_ZIP
     );
 
     static std::shared_ptr<Table> from_schema(
         const std::string& index,
         const t_schema& schema,
-        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max()
+        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max(),
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        apachearrow::t_list_flatten list_flatten =
+            apachearrow::LIST_FLATTEN_ZIP
     );
 
     static std::shared_ptr<Table> from_arrow(
         const std::string& index,
         std::string&& data,
-        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max()
+        std::uint32_t limit = std::numeric_limits<std::uint32_t>::max(),
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        apachearrow::t_list_flatten list_flatten =
+            apachearrow::LIST_FLATTEN_ZIP
     );
 
     static std::shared_ptr<Table> make_table(
@@ -243,10 +287,36 @@ public:
         const std::vector<t_dtype>& data_types,
         std::uint32_t limit,
         const std::string& index,
-        const std::string_view& data
+        const std::string_view& data,
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        apachearrow::t_list_flatten list_flatten =
+            apachearrow::LIST_FLATTEN_ZIP
     );
 
 private:
+    /**
+     * @brief Build a `Table` from an already-parsed JSON payload, shared by the
+     * three JSON creation formats.
+     */
+    static std::shared_ptr<Table> from_json_loader(
+        json::JsonLoader& loader,
+        const std::string& index,
+        std::string&& data,
+        std::uint32_t limit,
+        t_backing_store backing_store,
+        apachearrow::t_list_flatten list_flatten
+    );
+
+    /**
+     * @brief Apply a JSON payload to this `Table`, shared by the three JSON
+     * update formats.
+     */
+    void update_json(
+        const std::string_view& data,
+        json::t_json_format format,
+        std::uint32_t port_id
+    );
+
     /**
      * @brief Make sure that the table does not have an explicit index AND an
      * implicit index (with the `__INDEX__` column in data).
@@ -294,6 +364,16 @@ private:
      */
     const std::string m_index;
     bool m_gnode_set;
+    const t_backing_store m_backing_store;
+
+    /**
+     * @brief How `arrow::Type::LIST` columns are ingested.
+     *
+     * INVARIANT: this must be applied to `update_arrow` as well as to the
+     * `from_arrow` which created the Table, or an update would produce a
+     * different column shape than the schema it is written against.
+     */
+    const apachearrow::t_list_flatten m_list_flatten;
 };
 
 } // namespace perspective

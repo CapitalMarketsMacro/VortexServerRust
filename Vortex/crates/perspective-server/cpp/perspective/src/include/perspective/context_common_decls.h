@@ -24,8 +24,11 @@ void sort_by(const std::vector<t_sortspec>& sortby);
 
 void reset_sortby();
 
-// will only work on empty contexts
-void notify(const t_data_table& flattened);
+// will only work on empty contexts. `is_registration` is `true` when this
+// call is part of `_register_context` (no subscriber yet) and `false` when
+// it is the first update to a previously-empty table. When `true`, per-row
+// delta tracking is skipped to avoid O(N) allocations no observer can see.
+void notify(const t_data_table& flattened, bool is_registration);
 
 void notify(
     const t_data_table& flattened,
@@ -97,6 +100,15 @@ std::shared_ptr<t_data_table> get_table() const;
 bool is_expression_column(const std::string& colname) const;
 
 t_uindex num_expressions() const;
+
+/**
+ * @brief Whether this context's expression tables contribute any columns
+ * (expressions or windows) - i.e. whether the gnode must join them into the
+ * tables it notifies this context with.
+ */
+bool has_derived_columns() const;
+
+std::shared_ptr<t_window_engine> get_window_engine() const;
 
 std::shared_ptr<t_expression_tables> get_expression_tables() const;
 

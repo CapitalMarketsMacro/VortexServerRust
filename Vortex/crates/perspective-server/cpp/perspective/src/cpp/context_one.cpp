@@ -48,7 +48,11 @@ t_ctx1::init() {
     // `t_data_table`s so that each context's expressions are isolated
     // and do not affect other contexts when they are calculated.
     const auto& expressions = m_config.get_expressions();
-    m_expression_tables = std::make_shared<t_expression_tables>(expressions);
+    m_expression_tables = std::make_shared<t_expression_tables>(
+        expressions, m_config.get_backing_store(), m_config.get_windows()
+    );
+    m_window_engine =
+        std::make_shared<t_window_engine>(m_config.get_windows());
 
     m_init = true;
 }
@@ -119,7 +123,7 @@ std::pair<t_tscalar, t_tscalar>
 t_ctx1::get_min_max(const std::string& colname) const {
     auto rval = std::make_pair(mknone(), mknone());
     auto* aggtable = m_tree->get_aggtable();
-    t_schema aggschema = aggtable->get_schema();
+    const t_schema& aggschema = aggtable->get_schema();
     const auto* col = aggtable->_get_const_column(colname);
     auto colidx = aggschema.get_colidx(colname);
     auto depth = m_config.get_num_rpivots();
@@ -180,13 +184,14 @@ t_ctx1::get_data(
     std::vector<const t_column*> aggcols(m_config.get_num_aggregates());
 
     auto* aggtable = m_tree->get_aggtable();
-    t_schema aggschema = aggtable->get_schema();
     auto none = mknone();
 
     for (t_uindex aggidx = 0, loop_end = aggcols.size(); aggidx < loop_end;
          ++aggidx) {
-        const std::string& aggname = aggschema.m_columns[aggidx];
-        aggcols[aggidx] = aggtable->_get_const_column(aggname);
+        // `aggidx` is the column's position in the aggtable schema, so resolve
+        // by index — avoids the per-iteration name->index map lookup + a temp
+        // std::string, and the up-front schema deep-copy.
+        aggcols[aggidx] = aggtable->_get_const_column(aggidx);
     }
 
     const std::vector<t_aggspec>& aggspecs = m_config.get_aggregates();
@@ -237,13 +242,14 @@ t_ctx1::get_data(const std::vector<t_uindex>& rows) const {
     std::vector<const t_column*> aggcols(m_config.get_num_aggregates());
 
     auto* aggtable = m_tree->get_aggtable();
-    t_schema aggschema = aggtable->get_schema();
     auto none = mknone();
 
     for (t_uindex aggidx = 0, loop_end = aggcols.size(); aggidx < loop_end;
          ++aggidx) {
-        const std::string& aggname = aggschema.m_columns[aggidx];
-        aggcols[aggidx] = aggtable->_get_const_column(aggname);
+        // `aggidx` is the column's position in the aggtable schema, so resolve
+        // by index — avoids the per-iteration name->index map lookup + a temp
+        // std::string, and the up-front schema deep-copy.
+        aggcols[aggidx] = aggtable->_get_const_column(aggidx);
     }
 
     const std::vector<t_aggspec>& aggspecs = m_config.get_aggregates();
@@ -276,7 +282,7 @@ t_ctx1::get_data(const std::vector<t_uindex>& rows) const {
 }
 
 void
-t_ctx1::notify(const t_data_table& flattened) {
+t_ctx1::notify(const t_data_table& flattened, bool /* is_registration */) {
     PSP_TRACE_SENTINEL();
     PSP_VERBOSE_ASSERT(m_init, "touching uninited object");
 
@@ -525,18 +531,18 @@ t_ctx1::get_rows_changed() {
     const auto& deltas = m_tree->get_deltas();
     auto eidx = t_uindex(m_traversal->size());
 
+    // `idx` increases monotonically and is pushed at most once, so `rows` is
+    // already unique and sorted: the per-iteration `std::find` (which made this
+    // O(n^2)) and the trailing `std::sort` were both dead work.
     for (t_uindex idx = 0; idx < eidx; ++idx) {
         t_index ptidx = m_traversal->get_tree_index(idx);
         // Retrieve delta from storage and check if the row has been changed
         auto iterators = deltas->get<by_tc_nidx_aggidx>().equal_range(ptidx);
-        bool unique_ridx =
-            std::find(rows.begin(), rows.end(), idx) == rows.end();
-        if ((iterators.first != iterators.second) && unique_ridx) {
+        if (iterators.first != iterators.second) {
             rows.push_back(idx);
         }
     }
 
-    std::sort(rows.begin(), rows.end());
     return rows;
 }
 
@@ -616,13 +622,14 @@ t_ctx1::pprint() const {
 
     std::vector<const t_column*> aggcols(m_config.get_num_aggregates());
     auto* aggtable = m_tree->get_aggtable();
-    t_schema aggschema = aggtable->get_schema();
     auto none = mknone();
 
     for (t_uindex aggidx = 0, loop_end = aggcols.size(); aggidx < loop_end;
          ++aggidx) {
-        const std::string& aggname = aggschema.m_columns[aggidx];
-        aggcols[aggidx] = aggtable->_get_const_column(aggname);
+        // `aggidx` is the column's position in the aggtable schema, so resolve
+        // by index — avoids the per-iteration name->index map lookup + a temp
+        // std::string, and the up-front schema deep-copy.
+        aggcols[aggidx] = aggtable->_get_const_column(aggidx);
     }
 
     const std::vector<t_aggspec>& aggspecs = m_config.get_aggregates();
@@ -707,6 +714,10 @@ t_ctx1::compute_expressions(
             regex_mapping
         );
     }
+
+    // Windows read expression-alias sources from the master expression
+    // table, so they must compute after the expression loop.
+    m_window_engine->compute_master(master, pkey_map, master_expression_table);
 }
 
 void
@@ -784,6 +795,21 @@ t_ctx1::compute_expressions(
         );
     }
 
+    // Windows must compute after the expression loop (expression-alias
+    // sources) and before `calculate_transitions` (which diffs the window
+    // columns of `m_prev`/`m_current` like any other column).
+    m_window_engine->compute_update(
+        master,
+        pkey_map,
+        m_expression_tables->m_master,
+        m_expression_tables->m_flattened,
+        m_expression_tables->m_prev,
+        m_expression_tables->m_current,
+        m_expression_tables->m_delta,
+        flattened,
+        existed
+    );
+
     // Calculate the transitions now that the intermediate tables are computed
     m_expression_tables->calculate_transitions(existed);
 }
@@ -792,6 +818,16 @@ bool
 t_ctx1::is_expression_column(const std::string& colname) const {
     const t_schema& schema = m_expression_tables->m_master->get_schema();
     return schema.has_column(colname);
+}
+
+std::shared_ptr<t_window_engine>
+t_ctx1::get_window_engine() const {
+    return m_window_engine;
+}
+
+bool
+t_ctx1::has_derived_columns() const {
+    return m_expression_tables->m_master->get_schema().size() > 0;
 }
 
 t_uindex
@@ -903,8 +939,8 @@ t_ctx1::unity_init_load_step_end() {}
 
 std::shared_ptr<t_data_table>
 t_ctx1::get_table() const {
-    auto schema = m_tree->get_aggtable()->get_schema();
-    auto pivots = m_config.get_row_pivots();
+    const t_schema& schema = m_tree->get_aggtable()->get_schema();
+    const auto& pivots = m_config.get_row_pivots();
     auto tbl = std::make_shared<t_data_table>(schema, m_tree->size());
     tbl->init();
     tbl->extend(m_tree->size());

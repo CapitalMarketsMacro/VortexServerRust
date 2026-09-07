@@ -16,6 +16,7 @@
 #include <perspective/computed_expression.h>
 #include <perspective/data_table.h>
 #include <perspective/parallel_for.h>
+#include <perspective/window.h>
 
 namespace perspective {
 
@@ -30,7 +31,9 @@ struct t_expression_tables {
     PSP_NON_COPYABLE(t_expression_tables);
 
     t_expression_tables(
-        const std::vector<std::shared_ptr<t_computed_expression>>& expressions
+        const std::vector<std::shared_ptr<t_computed_expression>>& expressions,
+        t_backing_store backing_store = BACKING_STORE_MEMORY,
+        const std::vector<t_window_spec>& windows = {}
     );
 
     /**

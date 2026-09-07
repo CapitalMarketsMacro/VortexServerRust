@@ -1109,13 +1109,8 @@ t_tscalar::to_string(bool for_expr) const {
 
                 return ss.str();
             }
-            t_date date_val = get<t_date>();
-            tm t = date_val.get_tm();
-            time_t epoch_delta = mktime(&t);
-            std::chrono::milliseconds timestamp(epoch_delta * 1000);
-            date::sys_time<std::chrono::milliseconds> ts(timestamp);
-            return date::format("%F", ts);
 
+            return get<t_date>().str();
         } break;
         case DTYPE_BOOL: {
             ss << std::boolalpha << get<bool>();
@@ -1130,9 +1125,8 @@ t_tscalar::to_string(bool for_expr) const {
             return ss.str();
         } break;
         case DTYPE_TIME: {
-            // Convert a millisecond UTC timestamp to a formatted datestring in
-            // local time, as all datetimes exported to the user happens in
-            // local time and not UTC.
+            // Format a millisecond UTC timestamp as a UTC datestring;
+            // localization is the display layer's job.
             std::chrono::milliseconds timestamp(to_int64());
             date::sys_time<std::chrono::milliseconds> ts(timestamp);
             return date::format("%F %T", ts);
@@ -1622,6 +1616,18 @@ t_tscalar::cmp(t_filter_op op, const t_tscalar& other) const {
         } break;
         case FILTER_OP_CONTAINS: {
             return value.contains(other);
+        } break;
+        case FILTER_OP_NOT_BEGINS_WITH: {
+            return m_status == STATUS_VALID && other.m_status == STATUS_VALID
+                && !value.begins_with(other);
+        } break;
+        case FILTER_OP_NOT_ENDS_WITH: {
+            return m_status == STATUS_VALID && other.m_status == STATUS_VALID
+                && !value.ends_with(other);
+        } break;
+        case FILTER_OP_NOT_CONTAINS: {
+            return m_status == STATUS_VALID && other.m_status == STATUS_VALID
+                && !value.contains(other);
         } break;
         case FILTER_OP_IS_NULL: {
             return m_status != STATUS_VALID;

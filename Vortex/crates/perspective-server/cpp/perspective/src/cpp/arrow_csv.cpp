@@ -16,6 +16,9 @@
 #include <arrow/util/value_parsing.h>
 #include <arrow/io/memory.h>
 #include <arrow/buffer.h>
+// The ConanCenter pre-built Arrow is built with `with_csv=False`, so the
+// arrow::csv module is unavailable at link time. CSV ingest is compiled out
+// unless PSP_ENABLE_CSV is defined (see CLAUDE.md, "CSV support").
 #ifdef PSP_ENABLE_CSV
 #include <arrow/csv/reader.h>
 #endif
@@ -610,7 +613,8 @@ csvToTable(
 #ifdef PSP_ENABLE_CSV
     const arrow::io::IOContext& io_context = arrow::io::default_io_context();
     auto input = std::make_shared<arrow::io::BufferReader>(
-        arrow::Buffer::FromString(std::string(csv)));
+        arrow::Buffer::FromString(std::string(csv))
+    );
     auto read_options = arrow::csv::ReadOptions::Defaults();
     auto parse_options = arrow::csv::ParseOptions::Defaults();
     auto convert_options = arrow::csv::ConvertOptions::Defaults();
@@ -640,7 +644,9 @@ csvToTable(
     }
     return *maybe_table;
 #else
-    PSP_COMPLAIN_AND_ABORT("CSV support is disabled (Arrow built without with_csv)");
+    PSP_COMPLAIN_AND_ABORT(
+        "CSV support is disabled (Arrow built without with_csv)"
+    );
     return nullptr;
 #endif
 }

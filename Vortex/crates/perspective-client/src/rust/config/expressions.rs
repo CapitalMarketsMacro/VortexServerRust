@@ -259,7 +259,7 @@ pub struct CompletionItemSuggestion {
 }
 
 #[doc(hidden)]
-pub static COMPLETIONS: [CompletionItemSuggestion; 77] = [
+pub static COMPLETIONS: [CompletionItemSuggestion; 79] = [
     CompletionItemSuggestion {
         label: "var",
         insert_text: "var ${1:x := 1}",
@@ -536,6 +536,16 @@ pub static COMPLETIONS: [CompletionItemSuggestion; 77] = [
         label: "is_not_null",
         insert_text: "is_not_null(${1:x})",
         documentation: "Whether x is not a null value",
+    },
+    CompletionItemSuggestion {
+        label: "coalesce",
+        insert_text: "coalesce(${1:x}, ${2:y})",
+        documentation: "Returns the first non-null argument.",
+    },
+    CompletionItemSuggestion {
+        label: "contains",
+        insert_text: "contains(${1:x}, ${2:'substr'})",
+        documentation: "Whether the string column or value contains the literal substring.",
     },
     CompletionItemSuggestion {
         label: "not",

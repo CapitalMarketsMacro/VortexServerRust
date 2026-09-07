@@ -20,6 +20,7 @@
 #include <perspective/schema.h>
 #include <perspective/sort_specification.h>
 #include <perspective/computed_expression.h>
+#include <perspective/window.h>
 
 namespace perspective {
 
@@ -49,7 +50,8 @@ public:
         const std::vector<std::string>& detail_columns,
         const std::vector<t_fterm>& fterms,
         t_filter_op combiner,
-        const std::vector<std::shared_ptr<t_computed_expression>>& expressions
+        const std::vector<std::shared_ptr<t_computed_expression>>& expressions,
+        const std::vector<t_window_spec>& windows = {}
     );
 
     /**
@@ -66,7 +68,8 @@ public:
         const std::vector<t_aggspec>& aggregates,
         const std::vector<t_fterm>& fterms,
         t_filter_op combiner,
-        const std::vector<std::shared_ptr<t_computed_expression>>& expressions
+        const std::vector<std::shared_ptr<t_computed_expression>>& expressions,
+        const std::vector<t_window_spec>& windows = {}
     );
 
     /**
@@ -89,7 +92,8 @@ public:
         const std::vector<t_fterm>& fterms,
         t_filter_op combiner,
         const std::vector<std::shared_ptr<t_computed_expression>>& expressions,
-        bool column_only
+        bool column_only,
+        const std::vector<t_window_spec>& windows = {}
     );
 
     // An empty config, used for the unit context.
@@ -186,6 +190,8 @@ public:
 
     std::vector<std::shared_ptr<t_computed_expression>> get_expressions() const;
 
+    const std::vector<t_window_spec>& get_windows() const;
+
     t_totals get_totals() const;
 
     t_filter_op get_combiner() const;
@@ -205,6 +211,29 @@ public:
         return m_grand_agg_str;
     }
 
+    inline void
+    set_split_rollup(bool split_rollup) {
+        m_split_rollup = split_rollup;
+    }
+
+    inline bool
+    is_split_rollup() const {
+        return m_split_rollup;
+    }
+
+    // The backing store for any persistent storage created by the context built
+    // from this config (currently the expression `m_master` table). Inherited
+    // from the parent `Table`'s backing store. Defaults to memory.
+    inline void
+    set_backing_store(t_backing_store backing_store) {
+        m_backing_store = backing_store;
+    }
+
+    inline t_backing_store
+    get_backing_store() const {
+        return m_backing_store;
+    }
+
 protected:
     void populate_sortby(const std::vector<t_pivot>& pivots);
 
@@ -219,6 +248,7 @@ private:
     std::vector<t_sortspec> m_col_sortspecs;
     std::vector<t_fterm> m_fterms;
     std::vector<std::shared_ptr<t_computed_expression>> m_expressions;
+    std::vector<t_window_spec> m_windows;
     t_filter_op m_combiner;
     bool m_column_only;
 
@@ -235,6 +265,8 @@ private:
     std::string m_grand_agg_str;
     t_fmode m_fmode;
     bool m_has_pkey_agg;
+    bool m_split_rollup = false;
+    t_backing_store m_backing_store = BACKING_STORE_MEMORY;
 };
 
 } // end namespace perspective

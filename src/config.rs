@@ -180,6 +180,8 @@ pub struct TableConfig {
     /// Table name exposed to clients.
     pub name: String,
     /// Optional single-column index. Mutually exclusive with `composite_index`.
+    /// Requires a `source`: a static table is created with an empty schema, so
+    /// an index column cannot exist yet (startup fails with a clear error).
     #[serde(default)]
     pub index: Option<String>,
     /// Optional composite primary key. When set, a synthetic `_pk` column is
@@ -192,11 +194,42 @@ pub struct TableConfig {
     /// scalar columns.
     #[serde(default)]
     pub stringify_columns: Vec<String>,
+    /// How nested JSON *arrays* in columns NOT listed in `stringify_columns`
+    /// are ingested. `stringify` (default) stores the array as its JSON text,
+    /// exactly like `stringify_columns` does — the pre-Perspective-5 behaviour,
+    /// no row multiplication. `zip` / `cartesian` opt in to Perspective 5.x
+    /// list flattening (one output row per element, zipped across columns or
+    /// as a cartesian product). Nested *objects* always need
+    /// `stringify_columns` — the engine rejects them otherwise.
+    #[serde(default)]
+    pub list_flatten: ListFlattenMode,
     /// Optional ingress source. Tables without a source are static (created
     /// empty at startup) and only mutate via direct `Client::table` /
     /// `Table::update` calls from inside vortex-server.
     #[serde(default)]
     pub source: Option<TableSource>,
+}
+
+/// See [`TableConfig::list_flatten`]. Maps onto Perspective's `ListFlatten`
+/// table option; the engine's own default (`zip`) is deliberately NOT the
+/// default here so that upgrading the engine does not change ingest semantics.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ListFlattenMode {
+    #[default]
+    Stringify,
+    Zip,
+    Cartesian,
+}
+
+impl ListFlattenMode {
+    pub fn to_proto(self) -> perspective::proto::ListFlatten {
+        match self {
+            Self::Stringify => perspective::proto::ListFlatten::Stringify,
+            Self::Zip => perspective::proto::ListFlatten::Zip,
+            Self::Cartesian => perspective::proto::ListFlatten::Cartesian,
+        }
+    }
 }
 
 impl TableConfig {

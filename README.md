@@ -1,6 +1,6 @@
 # VortexServer
 
-High-performance WebSocket server for real-time data visualization, built on [Perspective](https://perspective.finos.org/) and [Axum](https://github.com/tokio-rs/axum).
+High-performance WebSocket server for real-time data visualization, built on [Perspective](https://perspective.finos.org/) (engine **v5.3.1**, vendored under `Vortex/`) and [Axum](https://github.com/tokio-rs/axum).
 
 VortexServer ingests streaming data from multiple transport protocols (NATS, Solace, WebSocket) and serves it to browser clients via `<perspective-viewer>` over WebSocket. Each table runs on an isolated C++ analytics engine instance with automatic supervision and restart.
 
@@ -61,8 +61,9 @@ cd VortexServerRust
 
 # 2. Build (first run downloads pre-built C++ deps via Conan + libsolclient,
 #    then compiles the Perspective C++ bridge — ~5-10 min, cached after.
-#    Needs gcc 13 / MSVC 2022 / apple-clang 17 for the prebuilt fast path;
-#    otherwise Conan compiles the C++ deps from source.)
+#    Needs gcc 13 / MSVC 2022 for the all-prebuilt path (apple-clang 17 on
+#    macOS is partial); any other toolchain fails with "Missing binary"
+#    unless PSP_CONAN_BUILD_MISSING=1 opts in to compiling C++ deps.)
 cargo build
 
 # 3. Copy and edit configuration
@@ -80,7 +81,8 @@ git clone https://github.com/CapitalMarketsMacro/VortexServerRust.git
 Set-Location VortexServerRust
 
 # 2. Build — prebuilt Conan deps + C++ bridge; ~5-10 min first run, cached after
-#    (MSVC 2022 / msvc 194 gives the prebuilt fast path; else Conan source-builds)
+#    (MSVC 2022 / msvc 194 gives the prebuilt path; other toolchains need
+#    PSP_CONAN_BUILD_MISSING=1 to compile the C++ deps from source)
 cargo build
 
 # 3. Copy and edit configuration
@@ -169,9 +171,10 @@ Each entry in the `tables` array creates a Perspective table exposed at `{ws_pat
 | Field | Description |
 |-------|-------------|
 | `name` | Table name (becomes the WebSocket endpoint) |
-| `index` | Primary key column for upserts |
+| `index` | Primary key column for upserts. Requires a `source` (a static table has no schema to index) |
 | `composite_index` | Array of columns forming a composite primary key |
 | `stringify_columns` | Columns to treat as strings regardless of inferred type |
+| `list_flatten` | How JSON *arrays* in other columns are ingested: `stringify` (default, stored as JSON text — no row multiplication), `zip` or `cartesian` (Perspective 5.x row expansion). Nested objects always need `stringify_columns` |
 | `source` | Ingress configuration (see transports below) |
 
 ### Transport Types
@@ -333,6 +336,12 @@ cargo run -p perspective-axum-example
 
 # Run tests
 cargo test
+cargo test -p perspective --features axum-ws        # engine-level: two clients, on_update
+cargo test -p vortex-server --test ws_roundtrip     # Perspective Client over a real Axum WebSocket
+
+# Probe a RUNNING server over its WebSocket (hosted tables, row count, schema;
+# --watch N re-reads the row count every second so live ingress is visible)
+cargo run --example ws_probe -- ws://127.0.0.1:4000/ws/Orders Orders --watch 5
 
 # Format and lint
 cargo fmt
@@ -389,7 +398,7 @@ broker's SEMP healthcheck to flip to ready. Subsequent starts are
 | Stop AND wipe state | `./scripts/solace.sh stop --wipe` | `.\scripts\solace.ps1 stop -Wipe` |
 | Restart | `./scripts/solace.sh restart` | `.\scripts\solace.ps1 restart` |
 
-Persisted state lives in the `vortexserverrust_solace-storage` Docker
+Persisted state lives in the `vortex-solace-storage` Docker
 volume — `stop` preserves it (queues, configuration, message backlog),
 `stop --wipe` deletes the whole volume.
 
@@ -453,7 +462,7 @@ Endpoints once running:
 - **HTTP monitoring** <http://localhost:8222> — `/varz` for server stats,
   `/jsz` for JetStream introspection, `/healthz` for readiness probes
 
-JetStream data persists in the `vortexserverrust_nats-storage` Docker
+JetStream data persists in the `vortex-nats-storage` Docker
 volume across `stop`/`start`, so a stream + messages remain after a
 restart. `stop --wipe` removes the volume so the next start is a clean
 slate.
@@ -595,8 +604,23 @@ nothing compiles from source. The exact, all-prebuilt dependency graph is
 pinned in `Vortex/crates/perspective-server/conan.lock`. Pre-built binaries
 are toolchain-specific, so the fast (no-source-compile) path needs **gcc 13**
 on Linux, **MSVC 2022 (msvc 194)** on Windows, or **apple-clang 17** on macOS;
-on any other toolchain the build still works but falls back to compiling the
-C++ deps from source. See CLAUDE.md → "C++ dependencies: pre-built only".
+on any other toolchain the build fails with a clear `Missing binary` error
+unless `PSP_CONAN_BUILD_MISSING=1` opts in to compiling the C++ deps from
+source (macOS coverage is partial: protobuf, abseil, re2 and libbacktrace
+have no apple-clang 17 binaries at the time of writing). See CLAUDE.md →
+"C++ dependencies: pre-built only".
+
+Once the Conan cache is warm (after the first build, or with a restored
+`~/.conan2` on CI) the build resolves everything from the cache with **no
+network access at all** — `build.rs` tries a `--no-remote --build=never`
+install first and only falls back to ConanCenter if something is missing.
+Set `PSP_CONAN_NO_REMOTE=1` to make that fallback an error for strictly
+offline builds.
+
+Note that the pre-built Arrow ships without its CSV module, so CSV ingest
+and CSV export are compiled out of the engine: feed tables JSON rows,
+JSON columns, NDJSON or Arrow IPC (which is what every ingress path here
+does anyway).
 
 ## License
 

@@ -92,6 +92,22 @@ pub struct TableInitOptions {
     #[serde(default)]
     #[ts(optional)]
     pub limit: Option<u32>,
+
+    /// Back this [`Table`]'s canonical data with the on-disk storage backend
+    /// instead of memory. On native targets this is a memory-mapped file; on
+    /// WASM it is OPFS (Worker only). Defaults to in-memory.
+    #[serde(default)]
+    #[ts(optional)]
+    pub page_to_disk: Option<bool>,
+
+    /// How Arrow `LIST` and JSON `Array` columns are ingested. `zip` (the
+    /// default) and `cartesian` expand a row into one row per list element,
+    /// and are incompatible with `index`, as the rows of an expansion
+    /// repeat their index. `stringify` encodes each list as a JSON array in
+    /// a single string column instead.
+    #[serde(default)]
+    #[ts(optional)]
+    pub list_flatten: Option<crate::proto::ListFlatten>,
 }
 
 impl TableInitOptions {
@@ -104,11 +120,16 @@ impl TryFrom<TableOptions> for MakeTableOptions {
     type Error = ClientError;
 
     fn try_from(value: TableOptions) -> Result<Self, Self::Error> {
+        let page_to_disk = value.page_to_disk;
+        let list_flatten = value.list_flatten.map(|x| x as i32);
         Ok(MakeTableOptions {
+            page_to_disk,
+            list_flatten,
             make_table_type: match value {
                 TableOptions {
                     index: Some(_),
                     limit: Some(_),
+                    ..
                 } => Err(ClientError::BadTableOptions)?,
                 TableOptions {
                     index: Some(index), ..
@@ -126,6 +147,8 @@ impl TryFrom<TableOptions> for MakeTableOptions {
 pub(crate) struct TableOptions {
     pub index: Option<String>,
     pub limit: Option<u32>,
+    pub page_to_disk: Option<bool>,
+    pub list_flatten: Option<crate::proto::ListFlatten>,
 }
 
 impl From<TableInitOptions> for TableOptions {
@@ -133,6 +156,8 @@ impl From<TableInitOptions> for TableOptions {
         TableOptions {
             index: value.index,
             limit: value.limit,
+            page_to_disk: value.page_to_disk,
+            list_flatten: value.list_flatten,
         }
     }
 }
@@ -242,13 +267,18 @@ impl Table {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```no_run
+    /// # use perspective_client::{Client, TableData, TableInitOptions, UpdateData};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client: Client = todo!();
     /// let options = TableInitOptions {
     ///     index: Some("x".to_string()),
-    ///     ..default()
+    ///     ..TableInitOptions::default()
     /// };
-    /// let table = client.table("x,y\n1,2\n3,4", options).await;
-    /// let index = table.get_index()
+    /// let data = TableData::Update(UpdateData::Csv("x,y\n1,2\n3,4".into()));
+    /// let table = client.table(data, options).await?;
+    /// let index = table.get_index();
+    /// # Ok(()) }
     /// ```
     pub fn get_index(&self) -> Option<String> {
         self.options.index.as_ref().map(|index| index.to_owned())
@@ -294,7 +324,10 @@ impl Table {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```no_run
+    /// # use perspective_client::{Client, DeleteOptions, TableData, TableInitOptions, UpdateData};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client: Client = todo!();
     /// let opts = TableInitOptions::default();
     /// let data = TableData::Update(UpdateData::Csv("x,y\n1,2\n3,4".into()));
     /// let table = client.table(data, opts).await?;
@@ -302,6 +335,7 @@ impl Table {
     /// // ...
     ///
     /// table.delete(DeleteOptions::default()).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn delete(&self, options: DeleteOptions) -> ClientResult<()> {
         let msg = self.client_message(ClientReq::TableDeleteReq(TableDeleteReq {
@@ -319,8 +353,12 @@ impl Table {
     ///  
     /// # Examples
     ///
-    /// ```rust
-    /// let columns = table.columns().await;
+    /// ```no_run
+    /// # use perspective_client::Table;
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
+    /// let columns = table.columns().await?;
+    /// # Ok(()) }
     /// ```
     pub async fn columns(&self) -> ClientResult<Vec<String>> {
         let msg = self.client_message(ClientReq::TableSchemaReq(TableSchemaReq {}));
@@ -430,8 +468,14 @@ impl Table {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// table.remove(UpdateData::Csv("index\n1\n2\n3")).await?;
+    /// ```no_run
+    /// # use perspective_client::{Table, UpdateData};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
+    /// table
+    ///     .remove(UpdateData::Csv("index\n1\n2\n3".into()))
+    ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub async fn remove(&self, input: UpdateData) -> ClientResult<()> {
         let msg = self.client_message(ClientReq::TableRemoveReq(TableRemoveReq {
@@ -457,10 +501,13 @@ impl Table {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```no_run
+    /// # use perspective_client::{Table, UpdateData};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
     /// let data = UpdateData::Csv("x,y\n1,2".into());
-    /// let opts = UpdateOptions::default();
-    /// table.replace(data, opts).await?;
+    /// table.replace(data).await?;
+    /// # Ok(()) }
     /// ```
     pub async fn replace(&self, input: UpdateData) -> ClientResult<()> {
         let msg = self.client_message(ClientReq::TableReplaceReq(TableReplaceReq {
@@ -491,11 +538,15 @@ impl Table {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```no_run
+    /// # use perspective_client::{Table, UpdateData, UpdateOptions};
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
     /// let data = UpdateData::Csv("x,y\n1,2".into());
     /// let opts = UpdateOptions::default();
     /// table.update(data, opts).await?;
-    /// ```  
+    /// # Ok(()) }
+    /// ```
     pub async fn update(&self, input: UpdateData, options: UpdateOptions) -> ClientResult<()> {
         let msg = self.client_message(ClientReq::TableUpdateReq(TableUpdateReq {
             data: Some(input.into()),
@@ -538,8 +589,12 @@ impl Table {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use crate::config::*;
+    /// ```no_run
+    /// # use std::collections::HashMap;
+    /// # use perspective_client::Table;
+    /// # use perspective_client::config::*;
+    /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let table: Table = todo!();
     /// let view = table
     ///     .view(Some(ViewConfigUpdate {
     ///         columns: Some(vec![Some("Sales".into())]),
@@ -552,6 +607,7 @@ impl Table {
     ///         ..ViewConfigUpdate::default()
     ///     }))
     ///     .await?;
+    /// # Ok(()) }
     /// ```
     pub async fn view(&self, config: Option<ViewConfigUpdate>) -> ClientResult<View> {
         let view_name = randid();

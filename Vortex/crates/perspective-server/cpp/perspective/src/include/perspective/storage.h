@@ -18,6 +18,7 @@
 #include <perspective/mask.h>
 #include <perspective/compat.h>
 #include <perspective/debug_helpers.h>
+#include <perspective/residency.h>
 #include <cmath>
 
 /*
@@ -93,9 +94,14 @@ typedef std::vector<t_lstore_recipe> t_lstore_argvec;
 
 #ifdef PSP_STORAGE_VERIFY
 #define STORAGE_CHECK_ACCESS_GET(idx)                                          \
-    PSP_VERBOSE_ASSERT(                                                        \
-        sizeof(T) * idx < (m_capacity + sizeof(T)), "Invalid access"           \
-    );
+    if (!(sizeof(T) * (idx) < (m_capacity + sizeof(T)))) {                     \
+        std::stringstream __psp_oob__;                                         \
+        __psp_oob__ << "Invalid get access in " << repr() << " idx=" << (idx)  \
+                    << " elemsize=" << sizeof(T)                               \
+                    << " byte_offset=" << (sizeof(T) * (idx))                  \
+                    << " m_size=" << m_size << " m_capacity=" << m_capacity;   \
+        PSP_COMPLAIN_AND_ABORT(__psp_oob__.str());                            \
+    }
 #define PSP_CHECK_CAPACITY()                                                   \
     PSP_VERBOSE_ASSERT(                                                        \
         m_size <= m_capacity,                                                  \
@@ -103,7 +109,14 @@ typedef std::vector<t_lstore_recipe> t_lstore_argvec;
         "mismatch"                                                             \
     )
 #define STORAGE_CHECK_ACCESS(idx)                                              \
-    PSP_VERBOSE_ASSERT(sizeof(T) * idx < m_capacity, "Invalid access");
+    if (!(sizeof(T) * (idx) < m_capacity)) {                                   \
+        std::stringstream __psp_oob__;                                         \
+        __psp_oob__ << "Invalid set access in " << repr() << " idx=" << (idx)  \
+                    << " elemsize=" << sizeof(T)                               \
+                    << " byte_offset=" << (sizeof(T) * (idx))                  \
+                    << " m_size=" << m_size << " m_capacity=" << m_capacity;   \
+        PSP_COMPLAIN_AND_ABORT(__psp_oob__.str());                            \
+    }
 #else
 #define STORAGE_CHECK_ACCESS(idx)
 #define STORAGE_CHECK_ACCESS_GET(idx)
@@ -204,6 +217,11 @@ public:
 
     t_lstore_recipe get_recipe() const;
 
+    // Like `get_recipe()`, but produces a recipe suitable for an *independent*
+    // copy: a `BACKING_STORE_DISK` clone gets its own fresh backing file rather
+    // than aliasing this store's file. Used by the clone paths.
+    t_lstore_recipe get_clone_recipe() const;
+
     void fill(const t_lstore& other);
 
     void fill(const t_lstore& other, const t_mask& mask, t_uindex elem_size);
@@ -225,6 +243,39 @@ public:
     bool
     empty() const {
         return size() == 0;
+    }
+
+    // ── Residency (memory relief for `BACKING_STORE_DISK`) ──────────────────
+    // Flush this store's resident buffer to its backing file and free it.
+    void evict();
+    // Re-read this store's buffer from its backing file (if currently evicted).
+    void restore();
+
+    bool
+    is_resident() const {
+        return m_init && m_backing_store == BACKING_STORE_DISK
+            && m_base != nullptr;
+    }
+
+    std::uint64_t
+    residency_tick() const {
+        return m_residency_tick;
+    }
+
+    // Lazily restore an evicted store on access. Called at the top of every
+    // method that dereferences `m_base`.
+    // Coarse residency hook: called once per column-FETCH (column-outer — see
+    // `t_data_table::get_column`), NOT per element. Restores an evicted disk
+    // store and stamps LRU recency. The per-element accessors are check-free, so
+    // tight flatten/read loops vectorize as they did before on-disk existed.
+    inline void
+    ensure_resident() {
+        if (m_backing_store == BACKING_STORE_DISK) {
+            if (m_base == nullptr) {
+                restore();
+            }
+            m_residency_tick = g_residency_tick;
+        }
     }
 
 #ifdef PSP_ENABLE_PYTHON
@@ -264,6 +315,7 @@ private:
     double m_resize_factor;
     t_uindex m_version;
     bool m_from_recipe;
+    std::uint64_t m_residency_tick = 0;
 
 #ifdef PSP_MPROTECT
     // size of padding + size of fields above

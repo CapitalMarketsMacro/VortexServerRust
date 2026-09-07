@@ -30,16 +30,21 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <perspective/server.h>
+#include <perspective/residency.h>
+#include <perspective/opfs.h>
 #include <re2/stringpiece.h>
 #include <string>
 #include <tsl/hopscotch_map.h>
+#include <unordered_map>
 #include <tsl/ordered_map.h>
 #include <vector>
 #include <ctime>
 
 #if defined(PSP_ENABLE_WASM) || defined(__linux__)
 #include <malloc.h>
+#include <dlfcn.h>
 #endif
 
 #if !defined(WIN32) && !defined(PSP_ENABLE_WASM)
@@ -104,7 +109,10 @@ make_context(
     auto sortspec = view_config->get_sortspec();
     auto expressions = view_config->get_used_expressions();
 
-    auto cfg = t_config(columns, fterm, filter_op, expressions);
+    auto cfg = t_config(
+        columns, fterm, filter_op, expressions, view_config->get_windows()
+    );
+    cfg.set_backing_store(table->get_backing_store());
     auto ctx0 = std::make_shared<t_ctx0>(*schema, cfg);
     ctx0->init();
     ctx0->sort_by(sortspec);
@@ -136,7 +144,15 @@ make_context(
     auto row_pivot_depth = view_config->get_row_pivot_depth();
     auto expressions = view_config->get_used_expressions();
 
-    auto cfg = t_config(row_pivots, aggspecs, fterm, filter_op, expressions);
+    auto cfg = t_config(
+        row_pivots,
+        aggspecs,
+        fterm,
+        filter_op,
+        expressions,
+        view_config->get_windows()
+    );
+    cfg.set_backing_store(table->get_backing_store());
     auto ctx1 = std::make_shared<t_ctx1>(*schema, cfg);
 
     ctx1->init();
@@ -184,7 +200,9 @@ make_context(
     auto column_pivot_depth = view_config->get_column_pivot_depth();
     auto expressions = view_config->get_used_expressions();
 
-    t_totals total = !sortspec.empty() ? TOTALS_BEFORE : TOTALS_HIDDEN;
+    bool split_rollup = view_config->is_split_rollup();
+    t_totals total =
+        (split_rollup || !sortspec.empty()) ? TOTALS_BEFORE : TOTALS_HIDDEN;
 
     auto cfg = t_config(
         row_pivots,
@@ -194,8 +212,11 @@ make_context(
         fterm,
         filter_op,
         expressions,
-        column_only
+        column_only,
+        view_config->get_windows()
     );
+    cfg.set_backing_store(table->get_backing_store());
+    cfg.set_split_rollup(split_rollup);
     auto ctx2 = std::make_shared<t_ctx2>(*schema, cfg);
 
     ctx2->init();
@@ -334,7 +355,7 @@ re_intern_strings(std::string&& expression) {
 static auto
 re_unintern_some_exprs(std::string&& expression) {
     static const RE2 interned_param(
-        "(?:match|match_all|search|indexof|replace|replace_all)\\("
+        "(?:match|match_all|search|indexof|replace|replace_all|contains)\\("
         "(?:.*?,\\s*(intern\\(('.*?')\\)))"
     );
     static const RE2 intern_match("intern\\(('.*?')\\)");
@@ -820,7 +841,7 @@ ProtoServer::handle_request(
 ) {
     const auto start = std::chrono::high_resolution_clock::now();
     proto::Request req_env;
-    req_env.ParseFromString(std::string(data));
+    req_env.ParseFromArray(data.data(), data.size());
     std::vector<ProtoServerResp<std::string>> serialized_responses;
     std::vector<proto::Response> responses;
 
@@ -875,6 +896,15 @@ ProtoServer::handle_request(
     m_cpu_time +=
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
             .count();
+
+#ifndef PSP_ENABLE_WASM
+    // Request safepoint: the response is fully serialized, so no raw column
+    // pointer is live. Trim resident disk-backed buffers to the memory budget.
+    // Native (mmap) evicts inline here. On WASM/OPFS eviction needs an async
+    // handle-open step, so the JS engine drives it (`prepare`/open/`commit`)
+    // after this synchronous call returns — see `engine.ts`/the poly.
+    t_residency_manager::inst().safepoint();
+#endif
 
     return serialized_responses;
 }
@@ -934,7 +964,30 @@ ProtoServer::poll() {
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
             .count();
 
+    // Request safepoint (see `handle_request`).
+#ifndef PSP_ENABLE_WASM
+    t_residency_manager::inst().safepoint();
+#endif
+
     return out;
+}
+
+// WASM/OPFS safepoint, driven from JS so the async OPFS handle-open step can run
+// between the two synchronous phases. `prepare` selects victims, the JS driver
+// opens each `residency_victim_fname(i)` handle, then `commit` flushes + frees.
+std::size_t
+ProtoServer::residency_prepare() {
+    return t_residency_manager::inst().prepare();
+}
+
+const char*
+ProtoServer::residency_victim_fname(std::size_t i) {
+    return t_residency_manager::inst().victim_fname(i);
+}
+
+void
+ProtoServer::residency_commit() {
+    t_residency_manager::inst().commit();
 }
 
 proto::ColumnType
@@ -1016,7 +1069,6 @@ parse_format_options(
     std::uint32_t max_cols = num_columns + (sides == 0 ? 0 : 1);
     std::uint32_t max_rows = num_rows;
     std::uint32_t psp_offset = sides > 0 || column_only ? 1 : 0;
-    std::uint32_t hidden = num_hidden;
 
     out.end_row = std::min(
         max_rows,
@@ -1025,12 +1077,12 @@ parse_format_options(
             : (viewport_height != 0 ? out.start_row + viewport_height : max_rows
             )
     );
+
     out.end_col = std::min(
         max_cols,
-        (viewport.has_end_col()
-             ? viewport.end_col() + psp_offset
-             : (viewport_width != 0 ? out.start_col + viewport_width : max_cols)
-        ) * (hidden + 1)
+        viewport.has_end_col()
+            ? viewport.end_col() + psp_offset
+            : (viewport_width != 0 ? out.start_col + viewport_width : max_cols)
     );
 
     return out;
@@ -1077,6 +1129,7 @@ needs_poll(const proto::Request::ClientReqCase proto_case) {
         case ReqCase::kViewRemoveOnUpdateReq:
         case ReqCase::kServerSystemInfoReq:
         case ReqCase::kGetFeaturesReq:
+        case ReqCase::kMakeJoinTableReq:
             return false;
         case proto::Request::CLIENT_REQ_NOT_SET:
             throw std::runtime_error("Unhandled request type 2");
@@ -1104,6 +1157,7 @@ entity_type_is_table(const proto::Request::ClientReqCase proto_case) {
         case ReqCase::kTableReplaceReq:
         case ReqCase::kTableDeleteReq:
         case ReqCase::kTableMakeViewReq:
+        case ReqCase::kMakeJoinTableReq:
             return true;
         case ReqCase::kViewOnDeleteReq:
         case ReqCase::kViewRemoveDeleteReq:
@@ -1371,9 +1425,89 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             features->set_sort(true);
             features->set_on_update(true);
             features->set_expressions(true);
+
+            const auto window_agg = [](const char* name,
+                                        std::initializer_list<const char*> frames,
+                                        bool offset,
+                                        bool alpha,
+                                        std::optional<proto::ColumnType> result_type
+                                     ) {
+                proto::WindowAggregateArgs args;
+                args.set_name(name);
+                for (const auto* frame : frames) {
+                    args.add_frames(frame);
+                }
+                args.set_offset(offset);
+                args.set_alpha(alpha);
+                if (result_type.has_value()) {
+                    args.set_result_type(*result_type);
+                }
+                return args;
+            };
+
+            const std::initializer_list<const char*> frames{
+                "rows", "range", "cumulative"
+            };
+            const std::initializer_list<const char*> no_frames{};
+
+            proto::GetFeaturesResp_WindowAggregateOptions numeric_aggs;
+            *numeric_aggs.add_options() =
+                window_agg("sum", frames, false, false, proto::ColumnType::FLOAT);
+            *numeric_aggs.add_options() =
+                window_agg("avg", frames, false, false, proto::ColumnType::FLOAT);
+            *numeric_aggs.add_options() =
+                window_agg("count", frames, false, false, proto::ColumnType::INTEGER);
+            *numeric_aggs.add_options() =
+                window_agg("min", frames, false, false, std::nullopt);
+            *numeric_aggs.add_options() =
+                window_agg("max", frames, false, false, std::nullopt);
+            *numeric_aggs.add_options() =
+                window_agg("stddev", frames, false, false, proto::ColumnType::FLOAT);
+            *numeric_aggs.add_options() =
+                window_agg("var", frames, false, false, proto::ColumnType::FLOAT);
+            *numeric_aggs.add_options() =
+                window_agg("lag", no_frames, true, false, std::nullopt);
+            *numeric_aggs.add_options() =
+                window_agg("lead", no_frames, true, false, std::nullopt);
+            *numeric_aggs.add_options() =
+                window_agg("diff", no_frames, true, false, proto::ColumnType::FLOAT);
+            // `rate` is defined on the order key's units, so only a `range`
+            // frame is meaningful for it.
+            *numeric_aggs.add_options() =
+                window_agg("rate", {"range"}, false, false, proto::ColumnType::FLOAT);
+            // `ema` is recursive - a smoothing factor, never a frame.
+            *numeric_aggs.add_options() =
+                window_agg("ema", no_frames, false, true, proto::ColumnType::FLOAT);
+
+            proto::GetFeaturesResp_WindowAggregateOptions any_aggs;
+            *any_aggs.add_options() =
+                window_agg("count", frames, false, false, proto::ColumnType::INTEGER);
+            *any_aggs.add_options() =
+                window_agg("min", frames, false, false, std::nullopt);
+            *any_aggs.add_options() =
+                window_agg("max", frames, false, false, std::nullopt);
+            *any_aggs.add_options() =
+                window_agg("lag", no_frames, true, false, std::nullopt);
+            *any_aggs.add_options() =
+                window_agg("lead", no_frames, true, false, std::nullopt);
+
+            auto& window_aggs = *features->mutable_window_aggregates();
+            window_aggs[proto::ColumnType::INTEGER] = numeric_aggs;
+            window_aggs[proto::ColumnType::FLOAT] = std::move(numeric_aggs);
+            window_aggs[proto::ColumnType::STRING] = any_aggs;
+            window_aggs[proto::ColumnType::DATE] = any_aggs;
+            window_aggs[proto::ColumnType::DATETIME] = any_aggs;
+            window_aggs[proto::ColumnType::BOOLEAN] = std::move(any_aggs);
+
             features->add_group_rollup_mode(proto::GroupRollupMode::ROLLUP);
             features->add_group_rollup_mode(proto::GroupRollupMode::FLAT);
             features->add_group_rollup_mode(proto::GroupRollupMode::TOTAL);
+            features->add_split_rollup_mode(
+                proto::SplitRollupMode::SPLIT_ROLLUP_MODE_FLAT
+            );
+            features->add_split_rollup_mode(
+                proto::SplitRollupMode::SPLIT_ROLLUP_MODE_ROLLUP
+            );
             proto::GetFeaturesResp_ColumnTypeOptions opts;
             opts.add_options("==");
             opts.add_options("!=");
@@ -1382,8 +1516,13 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             opts.add_options("<");
             opts.add_options("<=");
             opts.add_options("begins with");
+            opts.add_options("not begins with");
             opts.add_options("contains");
+            opts.add_options("not contains");
             opts.add_options("ends with");
+            opts.add_options("not ends with");
+            opts.add_options("matches");
+            opts.add_options("not matches");
             opts.add_options("in");
             opts.add_options("not in");
             opts.add_options("is not null");
@@ -1421,6 +1560,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             string_opts.add_aggregates()->set_name("count");
             string_opts.add_aggregates()->set_name("any");
             string_opts.add_aggregates()->set_name("distinct count");
+            string_opts.add_aggregates()->set_name("distinct leaf");
             string_opts.add_aggregates()->set_name("dominant");
             string_opts.add_aggregates()->set_name("first");
             string_opts.add_aggregates()->set_name("join");
@@ -1439,8 +1579,20 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             (*features->mutable_aggregates())[proto::ColumnType::STRING] =
                 string_opts;
 
+            proto::GetFeaturesResp_AggregateOptions bool_opts;
+            bool_opts.add_aggregates()->set_name("count");
+            bool_opts.add_aggregates()->set_name("and");
+            bool_opts.add_aggregates()->set_name("any");
+            bool_opts.add_aggregates()->set_name("distinct count");
+            bool_opts.add_aggregates()->set_name("distinct leaf");
+            bool_opts.add_aggregates()->set_name("dominant");
+            bool_opts.add_aggregates()->set_name("first");
+            bool_opts.add_aggregates()->set_name("last");
+            bool_opts.add_aggregates()->set_name("last by index");
+            bool_opts.add_aggregates()->set_name("or");
+            bool_opts.add_aggregates()->set_name("unique");
             (*features->mutable_aggregates())[proto::ColumnType::BOOLEAN] =
-                string_opts;
+                bool_opts;
 
             proto::GetFeaturesResp_AggregateOptions number_opts;
             number_opts.add_aggregates()->set_name("sum");
@@ -1449,8 +1601,10 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             number_opts.add_aggregates()->set_name("avg");
             number_opts.add_aggregates()->set_name("count");
             number_opts.add_aggregates()->set_name("distinct count");
+            number_opts.add_aggregates()->set_name("distinct leaf");
             number_opts.add_aggregates()->set_name("dominant");
             number_opts.add_aggregates()->set_name("first");
+            number_opts.add_aggregates()->set_name("gmv");
             number_opts.add_aggregates()->set_name("high");
             number_opts.add_aggregates()->set_name("low");
             number_opts.add_aggregates()->set_name("max");
@@ -1461,6 +1615,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             number_opts.add_aggregates()->set_name("last");
             number_opts.add_aggregates()->set_name("mean");
             number_opts.add_aggregates()->set_name("median");
+            number_opts.add_aggregates()->set_name("mul");
             number_opts.add_aggregates()->set_name("q1");
             number_opts.add_aggregates()->set_name("q3");
             number_opts.add_aggregates()->set_name("pct sum parent");
@@ -1473,6 +1628,12 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             auto args3 = number_opts.add_aggregates();
             args3->set_name("weighted mean");
             args3->add_args(proto::ColumnType::FLOAT);
+            auto args4 = number_opts.add_aggregates();
+            args4->set_name("min by");
+            args4->add_args(proto::ColumnType::FLOAT);
+            auto args5 = number_opts.add_aggregates();
+            args5->set_name("max by");
+            args5->add_args(proto::ColumnType::FLOAT);
             (*features->mutable_aggregates())[proto::ColumnType::INTEGER] =
                 number_opts;
 
@@ -1484,6 +1645,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             datetime_opts.add_aggregates()->set_name("any");
             datetime_opts.add_aggregates()->set_name("avg");
             datetime_opts.add_aggregates()->set_name("distinct count");
+            datetime_opts.add_aggregates()->set_name("distinct leaf");
             datetime_opts.add_aggregates()->set_name("dominant");
             datetime_opts.add_aggregates()->set_name("first");
             datetime_opts.add_aggregates()->set_name("high");
@@ -1573,6 +1735,27 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                     break;
             }
 
+            // On-disk backing: native uses a memory-mapped file; WASM uses the
+            // WasmFS/OPFS backend (`storage_impl_wasm.cpp`). The browser JS
+            // bootstrap mounts OPFS at `/perspective` before any table is built.
+            t_backing_store backing_store = r.options().page_to_disk()
+                ? BACKING_STORE_DISK
+                : BACKING_STORE_MEMORY;
+
+            apachearrow::t_list_flatten list_flatten;
+            switch (r.options().list_flatten()) {
+                case proto::LIST_FLATTEN_CARTESIAN:
+                    list_flatten = apachearrow::LIST_FLATTEN_CARTESIAN;
+                    break;
+                case proto::LIST_FLATTEN_STRINGIFY:
+                    list_flatten = apachearrow::LIST_FLATTEN_STRINGIFY;
+                    break;
+                case proto::LIST_FLATTEN_ZIP:
+                default:
+                    list_flatten = apachearrow::LIST_FLATTEN_ZIP;
+                    break;
+            }
+
             switch (r.data().data_case()) {
                 case proto::MakeTableData::kFromView: {
                     auto view = m_resources.get_view(r.data().from_view());
@@ -1592,42 +1775,78 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                         dims.end_col
                     );
 
-                    table = Table::from_arrow(index, std::move(*arrow), limit);
+                    table = Table::from_arrow(
+                        index,
+                        std::move(*arrow),
+                        limit,
+                        backing_store,
+                        list_flatten
+                    );
                     break;
                 }
                 case proto::MakeTableData::kFromArrow: {
                     std::string data = r.data().from_arrow();
                     { auto _ = std::move(req); }
 
-                    table = Table::from_arrow(index, std::move(data), limit);
+                    table = Table::from_arrow(
+                        index,
+                        std::move(data),
+                        limit,
+                        backing_store,
+                        list_flatten
+                    );
                     break;
                 }
                 case proto::MakeTableData::kFromCsv: {
                     std::string data = r.data().from_csv();
                     { auto _ = std::move(req); }
 
-                    table = Table::from_csv(index, std::move(data), limit);
+                    table = Table::from_csv(
+                        index,
+                        std::move(data),
+                        limit,
+                        backing_store,
+                        list_flatten
+                    );
                     break;
                 }
                 case proto::MakeTableData::kFromCols: {
                     std::string data = r.data().from_cols();
                     { auto _ = std::move(req); }
 
-                    table = Table::from_cols(index, std::move(data), limit);
+                    table = Table::from_cols(
+                        index,
+                        std::move(data),
+                        limit,
+                        backing_store,
+                        list_flatten
+                    );
                     break;
                 }
                 case proto::MakeTableData::kFromRows: {
                     std::string data = r.data().from_rows();
                     { auto _ = std::move(req); }
 
-                    table = Table::from_rows(index, std::move(data), limit);
+                    table = Table::from_rows(
+                        index,
+                        std::move(data),
+                        limit,
+                        backing_store,
+                        list_flatten
+                    );
                     break;
                 }
                 case proto::MakeTableData::kFromNdjson: {
                     std::string data = r.data().from_ndjson();
                     { auto _ = std::move(req); }
 
-                    table = Table::from_ndjson(index, std::move(data), limit);
+                    table = Table::from_ndjson(
+                        index,
+                        std::move(data),
+                        limit,
+                        backing_store,
+                        list_flatten
+                    );
                     break;
                 }
                 case proto::MakeTableData::kFromSchema: {
@@ -1640,7 +1859,9 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                     }
 
                     t_schema table_schema(columns, types);
-                    table = Table::from_schema(index, table_schema, limit);
+                    table = Table::from_schema(
+                        index, table_schema, limit, backing_store
+                    );
                     break;
                 }
                 case proto::MakeTableData::DATA_NOT_SET: {
@@ -1655,6 +1876,90 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             push_resp(std::move(resp));
 
             // Notify `on_thsoted_tables_update` listeners
+            auto subscriptions = m_resources.get_on_hosted_tables_update_sub();
+            for (auto& subscription : subscriptions) {
+                Response out;
+                out.set_msg_id(subscription.id);
+                ProtoServerResp<ProtoServer::Response> resp2;
+                resp2.data = std::move(out);
+                resp2.client_id = subscription.client_id;
+                proto_resp.emplace_back(std::move(resp2));
+            }
+
+            break;
+        }
+        case proto::Request::kMakeJoinTableReq: {
+            const auto& r = req.make_join_table_req();
+            if (m_resources.has_table(entity_id)) {
+                proto::Response resp;
+                auto* err = resp.mutable_server_error()->mutable_message();
+                std::stringstream ss;
+                ss << "Table \"" << entity_id << "\" already exists";
+                *err = ss.str();
+                push_resp(std::move(resp));
+                break;
+            }
+
+            if (!m_resources.has_table(r.left_table_id())) {
+                proto::Response resp;
+                auto* err = resp.mutable_server_error()->mutable_message();
+                std::stringstream ss;
+                ss << "Table \"" << r.left_table_id() << "\" not found";
+                *err = ss.str();
+                push_resp(std::move(resp));
+                break;
+            }
+
+            if (!m_resources.has_table(r.right_table_id())) {
+                proto::Response resp;
+                auto* err = resp.mutable_server_error()->mutable_message();
+                std::stringstream ss;
+                ss << "Table \"" << r.right_table_id() << "\" not found";
+                *err = ss.str();
+                push_resp(std::move(resp));
+                break;
+            }
+
+            auto left_table = m_resources.get_table(r.left_table_id());
+            auto right_table = m_resources.get_table(r.right_table_id());
+
+            auto result = m_join_engine.make_join_table(
+                r.on_column(), r.right_on_column(), r.join_type(), left_table, right_table
+            );
+
+            if (!result.ok()) {
+                proto::Response resp;
+                *resp.mutable_server_error()->mutable_message() = result.error;
+                push_resp(std::move(resp));
+                break;
+            }
+
+            m_resources.host_table(entity_id, result.table);
+            m_join_engine.register_join(
+                entity_id,
+                r.left_table_id(),
+                r.right_table_id(),
+                r.on_column(),
+                r.right_on_column(),
+                r.join_type()
+            );
+
+            // Compute initial join
+            m_join_engine.recompute(
+                entity_id, left_table, right_table, result.table
+            );
+
+            // Process the join table so its gnode state is up to date
+            auto jt = m_resources.get_table(entity_id);
+            jt->get_pool()->_process();
+            m_resources.mark_table_dirty(entity_id);
+            m_resources.mark_table_clean(entity_id);
+
+            proto::Response resp;
+            resp.mutable_make_join_table_resp();
+            push_resp(std::move(resp));
+
+            // Notify on_hosted_tables_update listeners
             auto subscriptions = m_resources.get_on_hosted_tables_update_sub();
             for (auto& subscription : subscriptions) {
                 Response out;
@@ -1768,6 +2073,13 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             break;
         }
         case proto::Request::kTableReplaceReq: {
+            if (m_join_engine.is_join_table(req.entity_id())) {
+                proto::Response resp;
+                *resp.mutable_server_error()->mutable_message() =
+                    "Cannot update a read-only join table";
+                push_resp(std::move(resp));
+                break;
+            }
             auto table = m_resources.get_table(req.entity_id());
             table->clear();
             const auto& r = req.table_replace_req();
@@ -1802,6 +2114,13 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             break;
         }
         case proto::Request::kTableRemoveReq: {
+            if (m_join_engine.is_join_table(req.entity_id())) {
+                proto::Response resp;
+                *resp.mutable_server_error()->mutable_message() =
+                    "Cannot update a read-only join table";
+                push_resp(std::move(resp));
+                break;
+            }
             const auto& r = req.table_remove_req();
             auto table = m_resources.get_table(req.entity_id());
             switch (r.data().data_case()) {
@@ -1831,6 +2150,13 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             break;
         }
         case proto::Request::kTableUpdateReq: {
+            if (m_join_engine.is_join_table(req.entity_id())) {
+                proto::Response resp;
+                *resp.mutable_server_error()->mutable_message() =
+                    "Cannot update a read-only join table";
+                push_resp(std::move(resp));
+                break;
+            }
             const auto& r = req.table_update_req();
             auto table = m_resources.get_table(req.entity_id());
             switch (r.data().data_case()) {
@@ -1982,6 +2308,235 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                 ));
             }
 
+            std::vector<t_window_spec> windows;
+            windows.reserve(cfg.windows_size());
+            const t_schema& table_schema = table->get_schema();
+
+            // `windows` is a proto map keyed by output alias; iterate in
+            // sorted-name order so output column registration (and thus
+            // any error precedence) is deterministic.
+            std::vector<std::string> window_names;
+            window_names.reserve(cfg.windows_size());
+            for (const auto& it : cfg.windows()) {
+                window_names.push_back(it.first);
+            }
+            std::sort(window_names.begin(), window_names.end());
+            for (const auto& name : window_names) {
+                const auto& w = cfg.windows().at(name);
+                if (name.empty()) {
+                    PSP_COMPLAIN_AND_ABORT("Window `name` must not be empty");
+                }
+
+                if (schema->has_column(name)) {
+                    PSP_COMPLAIN_AND_ABORT(
+                        "Window `name` collides with an existing column: "
+                        + name
+                    );
+                }
+
+                if (!schema->has_column(w.source())) {
+                    PSP_COMPLAIN_AND_ABORT(
+                        "Window `source` column not found: " + w.source()
+                    );
+                }
+
+                // `order_by`/`partition_by` must be real `Table` columns -
+                // the window engine reads them from the gnode master table,
+                // where expression aliases do not exist. An OMITTED
+                // `order_by` takes natural (primary key) order.
+                if (w.has_order_by()
+                    && !table_schema.has_column(w.order_by().column())) {
+                    PSP_COMPLAIN_AND_ABORT(
+                        "Window `order_by` must be a `Table` column: "
+                        + w.order_by().column()
+                    );
+                }
+
+                for (const auto& p : w.partition_by()) {
+                    if (!table_schema.has_column(p)) {
+                        PSP_COMPLAIN_AND_ABORT(
+                            "Window `partition_by` must be a `Table` column: "
+                            + p
+                        );
+                    }
+                }
+
+                static const std::unordered_map<std::string, t_window_op>
+                    WINDOW_OPS{
+                        {"sum", t_window_op::WINDOW_OP_SUM},
+                        {"avg", t_window_op::WINDOW_OP_AVG},
+                        {"count", t_window_op::WINDOW_OP_COUNT},
+                        {"min", t_window_op::WINDOW_OP_MIN},
+                        {"max", t_window_op::WINDOW_OP_MAX},
+                        {"stddev", t_window_op::WINDOW_OP_STDDEV},
+                        {"var", t_window_op::WINDOW_OP_VAR},
+                        {"first", t_window_op::WINDOW_OP_FIRST},
+                        {"last", t_window_op::WINDOW_OP_LAST},
+                        {"lag", t_window_op::WINDOW_OP_LAG},
+                        {"lead", t_window_op::WINDOW_OP_LEAD},
+                        {"diff", t_window_op::WINDOW_OP_DIFF},
+                        {"rate", t_window_op::WINDOW_OP_RATE},
+                        {"ema", t_window_op::WINDOW_OP_EMA},
+                    };
+
+                const auto op_entry = WINDOW_OPS.find(w.op());
+                if (op_entry == WINDOW_OPS.end()) {
+                    PSP_COMPLAIN_AND_ABORT(
+                        "Window `op` not implemented in this build: " + w.op()
+                    );
+                }
+
+                t_window_op op = op_entry->second;
+
+                // An OMITTED frame means cumulative for aggregating
+                // ops - the initializer below IS that default.
+                t_window_frame_type frame_type =
+                    t_window_frame_type::WINDOW_FRAME_CUMULATIVE;
+                t_uindex frame_rows = 0;
+                double frame_range = 0;
+                bool has_frame = true;
+                switch (w.frame_case()) {
+                    case proto::WindowSpec::kRows:
+                        frame_type = t_window_frame_type::WINDOW_FRAME_ROWS;
+                        frame_rows = w.rows();
+                        break;
+                    case proto::WindowSpec::kCumulative:
+                        frame_type =
+                            t_window_frame_type::WINDOW_FRAME_CUMULATIVE;
+                        break;
+                    case proto::WindowSpec::kRange: {
+                        frame_type = t_window_frame_type::WINDOW_FRAME_RANGE;
+                        frame_range = w.range();
+                        if (!(frame_range > 0)) {
+                            PSP_COMPLAIN_AND_ABORT(
+                                "Window `range` must be a positive interval"
+                            );
+                        }
+
+                        // Interval arithmetic is defined on the order
+                        // column's raw units (ms for datetime, days for
+                        // date) - the natural-order fallback has no units,
+                        // so `range` requires an explicit `order_by`.
+                        if (!w.has_order_by()) {
+                            PSP_COMPLAIN_AND_ABORT(
+                                "Window `range` frames require an explicit "
+                                "`order_by`"
+                            );
+                        }
+
+                        t_dtype order_dtype =
+                            table_schema.get_dtype(w.order_by().column());
+                        switch (order_dtype) {
+                            case DTYPE_INT8:
+                            case DTYPE_INT16:
+                            case DTYPE_INT32:
+                            case DTYPE_INT64:
+                            case DTYPE_UINT8:
+                            case DTYPE_UINT16:
+                            case DTYPE_UINT32:
+                            case DTYPE_UINT64:
+                            case DTYPE_FLOAT32:
+                            case DTYPE_FLOAT64:
+                            case DTYPE_TIME:
+                            case DTYPE_DATE:
+                                break;
+                            default:
+                                PSP_COMPLAIN_AND_ABORT(
+                                    "Window `range` frames require a numeric "
+                                    "or temporal `order_by` column: "
+                                    + w.order_by().column()
+                                );
+                        }
+                    } break;
+                    default:
+                        has_frame = false;
+                        break;
+                }
+
+                switch (op) {
+                    case t_window_op::WINDOW_OP_LAG:
+                    case t_window_op::WINDOW_OP_LEAD:
+                    case t_window_op::WINDOW_OP_DIFF:
+                        if (has_frame) {
+                            PSP_COMPLAIN_AND_ABORT(
+                                "Window `frame` is not applicable to "
+                                "`lag`/`lead`/`diff` (use `offset`)"
+                            );
+                        }
+                        break;
+                    case t_window_op::WINDOW_OP_RATE:
+                        if (frame_type
+                                != t_window_frame_type::WINDOW_FRAME_RANGE
+                            || !has_frame) {
+                            PSP_COMPLAIN_AND_ABORT(
+                                "Window `rate` requires a `range` frame"
+                            );
+                        }
+                        break;
+                    case t_window_op::WINDOW_OP_EMA:
+                        if (has_frame
+                            && frame_type
+                                != t_window_frame_type::
+                                    WINDOW_FRAME_CUMULATIVE) {
+                            PSP_COMPLAIN_AND_ABORT(
+                                "Window `ema` is cumulative; it does not "
+                                "accept a `rows` or `range` frame"
+                            );
+                        }
+
+                        if (!w.has_alpha() || !(w.alpha() > 0)
+                            || w.alpha() > 1) {
+                            PSP_COMPLAIN_AND_ABORT(
+                                "Window `ema` requires `alpha` in (0, 1]"
+                            );
+                        }
+                        break;
+                    default:
+                        break;
+                }
+
+                if (!t_window_engine::is_implemented(op, frame_type)) {
+                    PSP_COMPLAIN_AND_ABORT(
+                        "Window op/frame combination not implemented"
+                    );
+                }
+
+                t_dtype source_dtype = schema->get_dtype(w.source());
+                t_dtype dtype =
+                    t_window_engine::resolve_dtype(op, source_dtype);
+                if (dtype == DTYPE_NONE) {
+                    PSP_COMPLAIN_AND_ABORT(
+                        "Window op requires a numeric `source` column: "
+                        + w.source()
+                    );
+                }
+
+                t_window_spec spec;
+                spec.m_name = name;
+                spec.m_source = w.source();
+
+                // Empty `m_order_by` = natural (primary key) order; the
+                // engine's comparator degenerates to its pkey tiebreak when
+                // every order key is absent.
+                spec.m_order_by =
+                    w.has_order_by() ? w.order_by().column() : "";
+                spec.m_order_desc =
+                    w.has_order_by() && w.order_by().desc();
+                spec.m_partition_by = {
+                    w.partition_by().begin(), w.partition_by().end()
+                };
+                spec.m_op = op;
+                spec.m_frame_type = frame_type;
+                spec.m_frame_rows = frame_rows;
+                spec.m_frame_range = frame_range;
+                spec.m_offset = w.has_offset() ? w.offset() : 1;
+                spec.m_alpha = w.has_alpha() ? w.alpha() : 0;
+                spec.m_dtype = dtype;
+
+                schema->add_column(spec.m_name, dtype);
+                windows.push_back(std::move(spec));
+            }
+
             t_vocab vocab;
             vocab.init(false);
             std::vector<
@@ -2087,6 +2642,9 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                 for (const auto& f : expressions) {
                     columns.push_back(f->get_expression_alias());
                 }
+                for (const auto& w : windows) {
+                    columns.push_back(w.m_name);
+                }
             }
 
             LOG_DEBUG(
@@ -2122,6 +2680,9 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                 cfg.has_group_rollup_mode() ? cfg.group_rollup_mode() == 1 : false;
             bool total_only =
                 cfg.has_group_rollup_mode() ? cfg.group_rollup_mode() == 2 : false;
+            bool split_rollup = cfg.has_split_rollup_mode()
+                && cfg.split_rollup_mode()
+                    == proto::SplitRollupMode::SPLIT_ROLLUP_MODE_ROLLUP;
 
             auto config = std::make_shared<t_view_config>(
                 vocab,
@@ -2135,7 +2696,9 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                 filter_op,
                 column_only,
                 leaves_only,
-                total_only
+                total_only,
+                windows,
+                split_rollup
             );
             config->init(schema);
 
@@ -2160,7 +2723,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             bool is_unit_context = table->get_index().empty() && sides == 0
                 && row_pivots.empty() && column_pivots.empty()
                 && aggregates.empty() && columns.empty() && sort_str.empty()
-                && cfg.expressions().empty();
+                && cfg.expressions().empty() && cfg.windows().empty();
 
             std::shared_ptr<ErasedView> erased_view;
 
@@ -2267,7 +2830,12 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
 
             auto num_view_columns = 0;
             const auto real_size = config->get_columns().size();
-            if (ncols > 0 && real_size > 0) {
+            if (view->sides() == 2) {
+                // ctx2's `num_columns()` already excludes hidden sort
+                // columns (option B): visible-only is the value we want
+                // to report.
+                num_view_columns = ncols;
+            } else if (ncols > 0 && real_size > 0) {
                 num_view_columns = ncols
                     - (ncols / (config->get_columns().size() + num_hidden))
                         * num_hidden;
@@ -2453,6 +3021,12 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                 view_config_proto->set_group_rollup_mode(mode);
             }
 
+            view_config_proto->set_split_rollup_mode(
+                view_config->is_split_rollup()
+                    ? proto::SplitRollupMode::SPLIT_ROLLUP_MODE_ROLLUP
+                    : proto::SplitRollupMode::SPLIT_ROLLUP_MODE_FLAT
+            );
+
             for (const auto& expr : view_config->get_expressions()) {
                 auto* proto_exprs = view_config_proto->mutable_expressions();
                 (*proto_exprs)[expr->get_expression_alias()] =
@@ -2624,6 +3198,25 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             break;
         }
         case proto::Request::kTableDeleteReq: {
+            // Prevent deleting a source table that feeds a join table
+            auto dependents =
+                m_join_engine.get_dependent_join_tables(req.entity_id());
+            if (!dependents.empty()
+                && !m_join_engine.is_join_table(req.entity_id())) {
+                proto::Response resp;
+                std::stringstream ss;
+                ss << "Cannot delete table: it is a source for join table \""
+                   << dependents[0] << "\"";
+                *resp.mutable_server_error()->mutable_message() = ss.str();
+                push_resp(std::move(resp));
+                break;
+            }
+
+            // If this is a join table being deleted, clean up join metadata
+            if (m_join_engine.is_join_table(req.entity_id())) {
+                m_join_engine.unregister_join(req.entity_id());
+            }
+
             const auto is_immediate = req.table_delete_req().is_immediate();
             if (is_immediate
                 || m_resources.get_table_view_count(req.entity_id()) == 0) {
@@ -2660,6 +3253,21 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                 m_resources.mark_table_deleted(
                     req.entity_id(), client_id, req.msg_id()
                 );
+
+                // notify `on_hosted_tables_update` listeners — a lazily
+                // marked table leaves the hosted set NOW (`get_table_ids`
+                // filters it), and a listener releasing its `View`s is
+                // exactly what completes this delete.
+                auto subscriptions =
+                    m_resources.get_on_hosted_tables_update_sub();
+                for (auto& subscription : subscriptions) {
+                    Response out;
+                    out.set_msg_id(subscription.id);
+                    ProtoServerResp<ProtoServer::Response> resp2;
+                    resp2.data = std::move(out);
+                    resp2.client_id = subscription.client_id;
+                    proto_resp.emplace_back(std::move(resp2));
+                }
             }
 
             break;
@@ -2766,13 +3374,17 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
 
             proto::Response resp;
             auto* arrow = resp.mutable_view_to_arrow_resp()->mutable_arrow();
+            bool legacy_names = r.viewport().has_emit_legacy_row_path_names()
+                ? r.viewport().emit_legacy_row_path_names()
+                : true;
             *arrow = *view->to_arrow(
                 dims.start_row,
                 dims.end_row,
                 dims.start_col,
                 dims.end_col,
                 true,
-                r.compression() == "lz4"
+                r.compression() == "lz4",
+                legacy_names
             );
 
             push_resp(std::move(resp));
@@ -2862,11 +3474,43 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             const auto heap_size = psp_heap_size();
             sys_info->set_heap_size(heap_size);
             const auto res = mallinfo();
-            sys_info->set_used_size(res.uordblks);
+            sys_info->set_used_size(*reinterpret_cast<const unsigned int*>(&res.uordblks));
 #elif defined(__linux__) && !defined(PSP_ENABLE_WASM)
-            auto res = mallinfo();
-            sys_info->set_heap_size(res.usmblks);
+#if (__GLIBC__ > 2) || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33)
+            const auto res = mallinfo2();
+            sys_info->set_heap_size(res.arena);
             sys_info->set_used_size(res.uordblks);
+#else
+            static const auto mallinfo2 = [](){ 
+                    struct mallinfo2 {
+                        size_t arena;     /* Non-mmapped space allocated (bytes) */
+                        size_t ordblks;   /* Number of free chunks */
+                        size_t smblks;    /* Number of free fastbin blocks */
+                        size_t hblks;     /* Number of mmapped regions */
+                        size_t hblkhd;    /* Space allocated in mmapped regions
+                                                (bytes) */
+                        size_t usmblks;   /* See below */
+                        size_t fsmblks;   /* Space in freed fastbin blocks (bytes) */
+                        size_t uordblks;  /* Total allocated space (bytes) */
+                        size_t fordblks;  /* Total free space (bytes) */
+                        size_t keepcost;  /* Top-most, releasable space (bytes) */
+                    };            
+#ifdef _GNU_SOURCE    
+                    return (mallinfo2(*)())dlsym(RTLD_DEFAULT, "mallinfo2");
+#else
+                    return nullptr;
+#endif
+                }();
+            if (mallinfo2) {
+                const auto res = mallinfo2();
+                sys_info->set_heap_size(res.arena);
+                sys_info->set_used_size(res.uordblks);
+            } else { // Fallback to mallinfo if mallinfo2 is not available
+                const auto res = mallinfo();
+                sys_info->set_heap_size(*reinterpret_cast<const unsigned int*>(&res.arena));
+                sys_info->set_used_size(*reinterpret_cast<const unsigned int*>(&res.uordblks));
+            }
+#endif
 #elif defined(__APPLE__) && !defined(PSP_ENABLE_WASM)
             rusage out;
             getrusage(RUSAGE_SELF, &out);
@@ -2904,6 +3548,65 @@ ProtoServer::_poll() {
     }
 
     m_resources.mark_all_tables_clean();
+
+    // Build the set of dirty source table IDs so we can tell the join
+    // engine which side(s) changed, allowing it to skip rebuilding the
+    // right-side index when only the left table was updated.
+    tsl::hopscotch_set<ServerResources::t_id> dirty_ids;
+    for (auto& [_, table_id] : tables) {
+        dirty_ids.insert(table_id);
+    }
+
+    // Recompute join tables whose sources were dirty, using a worklist
+    // to handle chained joins (join of join) in dependency order.
+    tsl::hopscotch_set<ServerResources::t_id> processed_joins;
+    std::vector<ServerResources::t_id> worklist;
+    for (auto& [_, table_id] : tables) {
+        auto dependents = m_join_engine.get_dependent_join_tables(table_id);
+        for (auto& join_id : dependents) {
+            if (processed_joins.find(join_id) == processed_joins.end()) {
+                worklist.push_back(join_id);
+            }
+        }
+    }
+
+    while (!worklist.empty()) {
+        auto join_id = worklist.back();
+        worklist.pop_back();
+        if (!processed_joins.insert(join_id).second) {
+            continue;
+        }
+
+        const auto& def = m_join_engine.get_join_def(join_id);
+        bool left_changed = dirty_ids.contains(def.left_table_id);
+        bool right_changed = dirty_ids.contains(def.right_table_id);
+        auto left_table = m_resources.get_table(def.left_table_id);
+        auto right_table = m_resources.get_table(def.right_table_id);
+        auto join_table = m_resources.get_table(join_id);
+        m_join_engine.recompute(
+            join_id,
+            left_table,
+            right_table,
+            join_table,
+            left_changed,
+            right_changed
+        );
+
+        _process_table_unchecked(join_table, join_id, resp_envs);
+        m_resources.mark_table_clean(join_id);
+
+        // The recomputed join table is itself "dirty" for chained joins.
+        dirty_ids.insert(join_id);
+
+        // Check for chained joins (join tables that depend on this join)
+        auto chained = m_join_engine.get_dependent_join_tables(join_id);
+        for (auto& chained_id : chained) {
+            if (processed_joins.find(chained_id) == processed_joins.end()) {
+                worklist.push_back(chained_id);
+            }
+        }
+    }
+
     return resp_envs;
 }
 

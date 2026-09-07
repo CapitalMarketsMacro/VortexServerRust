@@ -100,13 +100,15 @@ pub struct ViewPort {
     pub start_col: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "3")]
     pub end_row: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub end_col: ::core::option::Option<u32>,
     ///    optional bool id = 5;
     ///    optional bool index = 3;
     ///    optional bool formatted = 6;
     ///    optional bool leaves_only = 7;
     ///    optional bool compression = 3;
-    #[prost(uint32, optional, tag = "4")]
-    pub end_col: ::core::option::Option<u32>,
+    #[prost(bool, optional, tag = "5")]
+    pub emit_legacy_row_path_names: ::core::option::Option<bool>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -334,9 +336,25 @@ pub struct GetFeaturesResp {
     >,
     #[prost(enumeration = "GroupRollupMode", repeated, tag = "8")]
     pub group_rollup_mode: ::prost::alloc::vec::Vec<i32>,
+    #[prost(map = "uint32, message", tag = "9")]
+    pub window_aggregates: ::std::collections::HashMap<
+        u32,
+        get_features_resp::WindowAggregateOptions,
+    >,
+    #[prost(bool, tag = "10")]
+    pub unordered: bool,
+    #[prost(enumeration = "SplitRollupMode", repeated, tag = "11")]
+    pub split_rollup_mode: ::prost::alloc::vec::Vec<i32>,
 }
 /// Nested message and enum types in `GetFeaturesResp`.
 pub mod get_features_resp {
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct WindowAggregateOptions {
+        #[prost(message, repeated, tag = "1")]
+        pub options: ::prost::alloc::vec::Vec<super::WindowAggregateArgs>,
+    }
     #[derive(serde::Serialize)]
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Message)]
@@ -360,6 +378,21 @@ pub mod get_features_resp {
         #[prost(enumeration = "super::ColumnType", repeated, tag = "2")]
         pub args: ::prost::alloc::vec::Vec<i32>,
     }
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WindowAggregateArgs {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "2")]
+    pub frames: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag = "3")]
+    pub offset: bool,
+    #[prost(bool, tag = "4")]
+    pub alpha: bool,
+    #[prost(enumeration = "ColumnType", optional, tag = "5")]
+    pub result_type: ::core::option::Option<i32>,
 }
 /// `Client::get_hosted_tables`
 #[derive(serde::Serialize)]
@@ -546,6 +579,13 @@ pub mod make_table_req {
     #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct MakeTableOptions {
+        /// Back this Table's canonical data with the on-disk storage backend
+        /// (memory-mapped file on native; OPFS on WASM) instead of memory.
+        /// Orthogonal to `make_table_type`, so it is a standalone field.
+        #[prost(bool, optional, tag = "3")]
+        pub page_to_disk: ::core::option::Option<bool>,
+        #[prost(enumeration = "super::ListFlatten", optional, tag = "4")]
+        pub list_flatten: ::core::option::Option<i32>,
         #[prost(oneof = "make_table_options::MakeTableType", tags = "1, 2")]
         pub make_table_type: ::core::option::Option<make_table_options::MakeTableType>,
     }
@@ -958,6 +998,52 @@ pub struct ServerSystemInfoResp {
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WindowSpec {
+    #[prost(string, tag = "2")]
+    pub source: ::prost::alloc::string::String,
+    /// The aggregate, in the data model's own vocabulary - see
+    /// `GetFeaturesResp.WindowAggregateArgs`. A string rather than an enum so
+    /// that a `View` can carry an op the built-in engine has never heard of,
+    /// e.g. kdb+'s `mdev`.
+    #[prost(string, tag = "3")]
+    pub op: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "4")]
+    pub partition_by: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, optional, tag = "5")]
+    pub order_by: ::core::option::Option<window_spec::Order>,
+    #[prost(uint32, optional, tag = "9")]
+    pub offset: ::core::option::Option<u32>,
+    #[prost(double, optional, tag = "10")]
+    pub alpha: ::core::option::Option<f64>,
+    #[prost(oneof = "window_spec::Frame", tags = "6, 7, 8")]
+    pub frame: ::core::option::Option<window_spec::Frame>,
+}
+/// Nested message and enum types in `WindowSpec`.
+pub mod window_spec {
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Message)]
+    pub struct Order {
+        #[prost(string, tag = "1")]
+        pub column: ::prost::alloc::string::String,
+        #[prost(bool, tag = "2")]
+        pub desc: bool,
+    }
+    #[derive(serde::Serialize)]
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Frame {
+        #[prost(uint32, tag = "6")]
+        Rows(u32),
+        #[prost(double, tag = "7")]
+        Range(f64),
+        #[prost(enumeration = "::prost_types::NullValue", tag = "8")]
+        Cumulative(i32),
+    }
+}
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ViewConfig {
     #[prost(string, repeated, tag = "1")]
     pub group_by: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -985,6 +1071,10 @@ pub struct ViewConfig {
     pub group_by_depth: ::core::option::Option<u32>,
     #[prost(enumeration = "GroupRollupMode", optional, tag = "10")]
     pub group_rollup_mode: ::core::option::Option<i32>,
+    #[prost(map = "string, message", tag = "11")]
+    pub windows: ::std::collections::HashMap<::prost::alloc::string::String, WindowSpec>,
+    #[prost(enumeration = "SplitRollupMode", optional, tag = "12")]
+    pub split_rollup_mode: ::core::option::Option<i32>,
 }
 /// Nested message and enum types in `ViewConfig`.
 pub mod view_config {
@@ -1227,6 +1317,71 @@ impl GroupRollupMode {
             "ROLLUP" => Some(Self::Rollup),
             "FLAT" => Some(Self::Flat),
             "TOTAL" => Some(Self::Total),
+            _ => None,
+        }
+    }
+}
+/// The `split_by` corollary to `GroupRollupMode`. `FLAT` (the wire default)
+/// is the historical behavior - only full-depth split combinations are
+/// emitted as columns. `ROLLUP` additionally emits grand-total and subtotal
+/// column groups in pre-order ("totals before"). Enum value names are
+/// prefixed because proto enum values share their parent scope with
+/// `GroupRollupMode`'s.
+#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SplitRollupMode {
+    Flat = 0,
+    Rollup = 1,
+}
+impl SplitRollupMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            SplitRollupMode::Flat => "SPLIT_ROLLUP_MODE_FLAT",
+            SplitRollupMode::Rollup => "SPLIT_ROLLUP_MODE_ROLLUP",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SPLIT_ROLLUP_MODE_FLAT" => Some(Self::Flat),
+            "SPLIT_ROLLUP_MODE_ROLLUP" => Some(Self::Rollup),
+            _ => None,
+        }
+    }
+}
+#[derive(serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ListFlatten {
+    Zip = 0,
+    Cartesian = 1,
+    Stringify = 2,
+}
+impl ListFlatten {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            ListFlatten::Zip => "LIST_FLATTEN_ZIP",
+            ListFlatten::Cartesian => "LIST_FLATTEN_CARTESIAN",
+            ListFlatten::Stringify => "LIST_FLATTEN_STRINGIFY",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "LIST_FLATTEN_ZIP" => Some(Self::Zip),
+            "LIST_FLATTEN_CARTESIAN" => Some(Self::Cartesian),
+            "LIST_FLATTEN_STRINGIFY" => Some(Self::Stringify),
             _ => None,
         }
     }
