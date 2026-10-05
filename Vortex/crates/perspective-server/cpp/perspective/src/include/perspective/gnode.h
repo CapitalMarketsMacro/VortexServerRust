@@ -138,6 +138,17 @@ public:
     bool process(t_uindex port_id);
 
     /**
+     * @brief The primary keys of rows that existed before the most recent
+     * `process` and were removed by it, as a one-column `psp_pkey`
+     * `t_data_table`, or `nullptr` when that step removed nothing or removes
+     * are not enabled.
+     */
+    std::shared_ptr<t_data_table> get_removed_pkeys() const;
+
+    void set_removes_enabled(bool enabled);
+    bool get_removes_enabled() const;
+
+    /**
      * @brief Create a new input port, store it in `m_input_ports`, and
      * return the integer ID that references the new port.
      *
@@ -361,34 +372,14 @@ protected:
      * Expression Column Operations
      */
 
-    /**
-     * @brief Compute all expressions on each registered context using the
-     * flattened table. This method is called on the first update applied
-     * on an empty gstate master table.
-     */
     void
     _compute_expressions(const std::shared_ptr<t_data_table>& flattened_masked);
 
-    /**
-     * @brief Compute all expressions on each registered context using all
-     * data and transition tables. This method is called on all subsequent
-     * updates applied after the first update.
-     */
     void _compute_expressions(
         const std::shared_ptr<t_data_table>& master,
         const std::shared_ptr<t_data_table>& flattened
     );
 
-    /**
-     * @brief The window widening pass (WINDOW_FUNCTIONS_PLAN §2.3): apply
-     * the update batch to every registered context's window indexes, then
-     * append a synthesized "unchanged" row to `flattened` and the
-     * transitional port tables for each row OUTSIDE the batch whose window
-     * outputs may change. The ordinary pipeline then reports those rows'
-     * window deltas, and its per-row prev/current diffing suppresses the
-     * over-approximation. Must run after `m_gstate` is updated and before
-     * `_compute_expressions`.
-     */
     void _process_windows(
         const std::shared_ptr<t_data_table>& flattened,
         const std::vector<t_rlookup>& lookup
@@ -434,6 +425,10 @@ private:
     std::chrono::high_resolution_clock::time_point m_epoch;
     std::function<void()> m_pool_cleanup;
     bool m_was_updated;
+    bool m_removes_enabled = false;
+    bool m_reset_pending = false;
+    std::shared_ptr<t_data_table> m_removed_pkeys;
+    std::shared_ptr<t_data_table> m_reset_pkeys;
 
     std::shared_ptr<t_expression_vocab> m_expression_vocab;
     std::shared_ptr<t_regex_mapping> m_expression_regex_mapping;

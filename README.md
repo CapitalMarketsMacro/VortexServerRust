@@ -1,6 +1,6 @@
 # VortexServer
 
-High-performance WebSocket server for real-time data visualization, built on [Perspective](https://perspective.finos.org/) (engine **v5.3.1**, vendored under `Vortex/`) and [Axum](https://github.com/tokio-rs/axum).
+High-performance WebSocket server for real-time data visualization, built on [Perspective](https://perspective.finos.org/) (engine **v5.5.1**, vendored under `Vortex/`) and [Axum](https://github.com/tokio-rs/axum).
 
 VortexServer ingests streaming data from multiple transport protocols (NATS, Solace, WebSocket) and serves it to browser clients via `<perspective-viewer>` over WebSocket. Each table runs on an isolated C++ analytics engine instance with automatic supervision and restart.
 
