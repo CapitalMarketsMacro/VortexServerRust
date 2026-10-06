@@ -798,7 +798,7 @@ View<CTX_T>::to_arrow(
     std::int32_t start_col,
     std::int32_t end_col,
     bool emit_group_by,
-    bool compress,
+    t_arrow_compression compression,
     bool emit_legacy_row_path_names
 ) const {
     PSP_GIL_UNLOCK();
@@ -806,7 +806,9 @@ View<CTX_T>::to_arrow(
 
     std::shared_ptr<t_data_slice<CTX_T>> data_slice =
         get_data(start_row, end_row, start_col, end_col);
-    return data_slice_to_arrow(data_slice, emit_group_by, compress, emit_legacy_row_path_names);
+    return data_slice_to_arrow(
+        data_slice, emit_group_by, compression, emit_legacy_row_path_names
+    );
 };
 
 template <>
@@ -1418,7 +1420,7 @@ std::shared_ptr<std::string>
 View<CTX_T>::data_slice_to_arrow(
     std::shared_ptr<t_data_slice<CTX_T>> data_slice,
     bool emit_group_by,
-    bool compress,
+    t_arrow_compression compression,
     bool emit_legacy_row_path_names
 ) const {
     std::pair<
@@ -1440,9 +1442,25 @@ View<CTX_T>::data_slice_to_arrow(
     buffer = *allocated;
     arrow::io::BufferOutputStream sink(buffer);
     auto options = arrow::ipc::IpcWriteOptions::Defaults();
-    if (compress) {
-        auto codec = arrow::util::Codec::Create(arrow::Compression::LZ4_FRAME);
-        options.codec = std::move(codec).ValueUnsafe();
+    // The ConanCenter pre-built Arrow has `with_lz4=False` / `with_zstd=False`,
+    // so `Codec::Create` fails there; fall back to an uncompressed IPC body
+    // instead of calling `ValueUnsafe()` on an error (see CLAUDE.md).
+    switch (compression) {
+        case t_arrow_compression::LZ4: {
+            auto codec =
+                arrow::util::Codec::Create(arrow::Compression::LZ4_FRAME);
+            if (codec.ok()) {
+                options.codec = std::move(codec).ValueUnsafe();
+            }
+        } break;
+        case t_arrow_compression::ZSTD: {
+            auto codec = arrow::util::Codec::Create(arrow::Compression::ZSTD);
+            if (codec.ok()) {
+                options.codec = std::move(codec).ValueUnsafe();
+            }
+        } break;
+        case t_arrow_compression::NONE:
+            break;
     }
 
 #ifdef PSP_PARALLEL_FOR
@@ -1981,6 +1999,7 @@ View<T>::to_rows(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);
@@ -2016,10 +2035,11 @@ View<T>::to_rows(
                 std::pair<t_uindex, t_uindex> pair{r, 0};
                 std::vector<std::pair<t_uindex, t_uindex>> vec{pair};
                 const auto keys = m_ctx->get_pkeys(vec);
-                const t_tscalar& scalar = keys[0];
                 writer.Key("__ID__");
                 writer.StartArray();
-                write_scalar(scalar, is_formatted, writer);
+                if (!keys.empty()) {
+                    write_scalar(keys[0], is_formatted, writer);
+                }
                 writer.EndArray();
             }
 
@@ -2069,6 +2089,7 @@ View<t_ctx1>::to_rows(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);
@@ -2166,6 +2187,7 @@ View<t_ctx2>::to_rows(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);
@@ -2314,6 +2336,7 @@ View<T>::to_ndjson(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     if (start_row == end_row || (start_col == end_col && !has_row_path)) {
         return "";
@@ -2350,10 +2373,11 @@ View<T>::to_ndjson(
                 std::pair<t_uindex, t_uindex> pair{r, 0};
                 std::vector<std::pair<t_uindex, t_uindex>> vec{pair};
                 const auto keys = m_ctx->get_pkeys(vec);
-                const t_tscalar& scalar = keys[0];
                 writer.Key("__ID__");
                 writer.StartArray();
-                write_scalar(scalar, is_formatted, writer);
+                if (!keys.empty()) {
+                    write_scalar(keys[0], is_formatted, writer);
+                }
                 writer.EndArray();
             }
 
@@ -2403,6 +2427,7 @@ View<t_ctx1>::to_ndjson(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     if (start_row == end_row || (start_col == end_col && !has_row_path)) {
         return "";
@@ -2504,6 +2529,7 @@ View<t_ctx2>::to_ndjson(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     if (start_row == end_row || (start_col == end_col && !has_row_path)) {
         return "";
@@ -2604,6 +2630,7 @@ View<T>::to_columns(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const std::vector<std::vector<t_tscalar>>& col_names =
         slice->get_column_names();
 
@@ -2636,9 +2663,10 @@ View<T>::to_columns(
             std::pair<t_uindex, t_uindex> pair{x, 0};
             std::vector<std::pair<t_uindex, t_uindex>> vec{pair};
             const auto keys = m_ctx->get_pkeys(vec);
-            const t_tscalar& scalar = keys[0];
             writer.StartArray();
-            write_scalar(scalar, is_formatted, writer);
+            if (!keys.empty()) {
+                write_scalar(keys[0], is_formatted, writer);
+            }
             writer.EndArray();
         }
 
@@ -2670,6 +2698,7 @@ View<t_ctx1>::to_columns(
     PSP_READ_LOCK(*get_lock());
 
     auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);
@@ -2740,6 +2769,7 @@ View<t_ctx2>::to_columns(
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
     const auto slice = get_data(start_row, end_row, start_col, end_col);
+    end_row = start_row + slice->num_rows();
     const auto& col_names = slice->get_column_names();
     rapidjson::StringBuffer s;
     rapidjson::Writer<rapidjson::StringBuffer> writer(s);

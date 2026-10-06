@@ -1655,7 +1655,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perspective"
-version = "5.3.1"
+version = "5.5.1"
 dependencies = [
  "async-lock",
  "axum",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "perspective-client"
-version = "5.3.1"
+version = "5.5.1"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "perspective-server"
-version = "5.3.1"
+version = "5.5.1"
 dependencies = [
  "async-lock",
  "cmake",

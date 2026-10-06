@@ -159,7 +159,7 @@ namespace server {
             t_uindex start_col,
             t_uindex end_col,
             bool emit_group_by = true,
-            bool compress = true,
+            t_arrow_compression compression = t_arrow_compression::LZ4,
             bool emit_legacy_row_path_names = true
         ) const = 0;
 
@@ -292,11 +292,17 @@ namespace server {
             t_uindex start_col,
             t_uindex end_col,
             bool emit_group_by = true,
-            bool compress = true,
+            t_arrow_compression compression = t_arrow_compression::LZ4,
             bool emit_legacy_row_path_names = true
         ) const override {
             return m_view->to_arrow(
-                start_row, end_row, start_col, end_col, emit_group_by, compress, emit_legacy_row_path_names
+                start_row,
+                end_row,
+                start_col,
+                end_col,
+                emit_group_by,
+                compression,
+                emit_legacy_row_path_names
             );
         }
 
@@ -474,7 +480,9 @@ namespace server {
         std::shared_ptr<std::string>
         get_row_delta_as_arrow() const override {
             auto delta = m_view->get_row_delta();
-            return m_view->data_slice_to_arrow(delta, false, false);
+            return m_view->data_slice_to_arrow(
+                delta, false, t_arrow_compression::NONE
+            );
         }
 
         void
@@ -581,6 +589,15 @@ namespace server {
             const t_id& table_id, std::uint32_t sub_id, std::uint32_t client_id
         );
 
+        // `View::on_remove()`
+        void create_view_on_remove_sub(const t_id& view_id, Subscription sub);
+        std::vector<Subscription> get_view_on_remove_sub(const t_id& view_id);
+        void remove_view_on_remove_sub(
+            const t_id& view_id, std::uint32_t sub_id, std::uint32_t client_id
+        );
+        void drop_view_on_remove_sub(const t_id& view_id);
+        bool table_has_on_remove_subs(const t_id& table_id);
+
         // `View::on_delete()`
         void create_view_on_delete_sub(const t_id& view_id, Subscription sub);
         std::vector<Subscription> get_view_on_delete_sub(const t_id& view_id);
@@ -627,6 +644,9 @@ namespace server {
 
         tsl::hopscotch_map<t_id, std::vector<Subscription>>
             m_table_on_delete_subs;
+
+        tsl::hopscotch_map<t_id, std::vector<Subscription>>
+            m_view_on_remove_subs;
 
         std::vector<Subscription> m_on_hosted_tables_update_subs;
 

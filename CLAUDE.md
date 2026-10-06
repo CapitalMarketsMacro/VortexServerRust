@@ -11,7 +11,7 @@ on [Perspective](https://perspective.finos.org/) (a C++ analytics
 engine with Rust bindings). The Perspective engine lives in `Vortex/`
 as a dependency; the main application is at the repo root.
 
-The vendored engine is **Perspective v5.3.1** (`perspective`,
+The vendored engine is **Perspective v5.5.1** (`perspective`,
 `perspective-client`, `perspective-server` crates, taken from the crates.io
 tarballs) plus a small, documented set of local patches — see
 "Perspective fork: local patches & upgrade recipe" below before touching
@@ -128,7 +128,7 @@ perspective          (facade + Axum WebSocket server)
 
 ## Perspective fork: local patches & upgrade recipe
 
-`Vortex/crates/*` is upstream Perspective **v5.3.1** from the crates.io
+`Vortex/crates/*` is upstream Perspective **v5.5.1** from the crates.io
 tarballs (`https://static.crates.io/crates/<name>/<name>-<ver>.crate`), not
 a git subtree. Upstream builds its C++ deps from source with CMake
 ExternalProject; this repo replaces that with Conan pre-built binaries. The
@@ -156,7 +156,7 @@ upstream) is:
   stray one on PATH), macOS arm64 download name.
 - Removed: `cmake/*.txt.in`, `cmake/re2/`, `cpp/perspective/env.js`
   (ExternalProject / WASM only).
-- C++ source (3 files): `arrow_csv.cpp` + `view.cpp` gate the Arrow CSV
+- C++ source (3 files, 4 patches): `arrow_csv.cpp` + `view.cpp` gate the Arrow CSV
   reader/writer behind `PSP_ENABLE_CSV` (see "CSV support" under Key
   Patterns); inside that gate `arrow_csv.cpp` also includes
   `<arrow/buffer.h>` and builds the `BufferReader` from
@@ -164,7 +164,10 @@ upstream) is:
   `string_view` constructor upstream (Arrow 18) relies on;
   `computed_function.cpp` uses `std::string(result)` instead of
   `re2::StringPiece::ToString()` (re2 ≥ 2023 aliases `StringPiece` to
-  `absl::string_view`).
+  `absl::string_view`); `view.cpp`'s `data_slice_to_arrow` only installs
+  the LZ4 / ZSTD IPC codec when `arrow::util::Codec::Create` succeeds (see
+  "Arrow IPC compression" under Key Patterns) instead of calling
+  `ValueUnsafe()` on an error `Result`.
 - Rust (`src/ffi.rs`, `src/local_session.rs`, `src/server.rs`) — every call
   that takes the C++ server pointer (`ffi::Server::{new_session,
   handle_request, poll, close_session}`) is serialized through an
@@ -186,7 +189,10 @@ ConanCenter ships pre-built. When upstream bumps a pin (check
 `cmake/*.txt.in` in the new tarball), bump the Conan requirement — v5.3.1
 needed `exprtk/0.0.3` for `vector_access_runtime_check`.
 
-**Upgrade recipe** (what was done for 4.3.0 / client 4.4.0 → 5.3.1):
+**Upgrade recipe** (what was done for 4.3.0 / client 4.4.0 → 5.3.1, and
+again for 5.3.1 → 5.5.1, where every upstream hunk 3-way merged cleanly
+with `git merge-file <vendored> <old tarball> <new tarball>` and no Conan
+requirement changed):
 1. Download + extract the three tarballs for the target version into a
    scratch dir. Also keep the *current* upstream version's tarballs.
 2. `perspective-client`, `perspective`: delete and copy in wholesale, then
@@ -215,7 +221,7 @@ needed `exprtk/0.0.3` for `vector_access_runtime_check`.
 
 | Tool | Version | Why |
 |---|---|---|
-| Rust nightly-2026-01-01 | exact, pinned | `rust-toolchain.toml`; `rustfmt.toml` uses unstable features (import grouping, comment wrapping). Upstream 5.3.1 pins nightly-2026-06-01 but its crates build fine on this older nightly, so the enterprise toolchain pin is unchanged |
+| Rust nightly-2026-01-01 | exact, pinned | `rust-toolchain.toml`; `rustfmt.toml` uses unstable features (import grouping, comment wrapping). Upstream 5.5.1 pins nightly-2026-06-01 but its crates build fine on this older nightly, so the enterprise toolchain pin is unchanged |
 | Conan 2.x | latest | C++ dependency manager for Vortex/ |
 | CMake 3.20+ | latest | C++ build |
 | C++17 compiler | latest | Xcode (macOS), GCC/Clang (Linux), MSVC 2022 (Windows) |
@@ -427,6 +433,7 @@ When debugging an ingress problem, the workflow is: bring up the matching broker
 - **Lazy init**: `OnceLock` for `Client` and `Session` initialization in `LocalClient`/`LocalSession`. `TableSlot` also lazy-creates its table from the first ingress message (so schema is inferred from real data).
 - **Session IDs**: `u32` client_id assigned per FFI session, tracked in server's session map.
 - **`TableInitOptions` grows fields** (5.x added `page_to_disk`, `list_flatten`): always build it with `TableInitOptions::default()` + `set_name()` / field assignment, never a struct literal.
+- **Arrow IPC compression falls back to none.** The pre-built Arrow also has `with_lz4=False` / `with_zstd=False`, so `View::to_arrow` with `compression: "lz4"` / `"zstd"` (and the engine-internal LZ4 default used by `client.table(TableData::View(..))`) returns an *uncompressed* Arrow IPC stream — still valid Arrow, just larger. Enabling the codecs in `conanfile.py` changes Arrow's package_id and forces a source build — don't.
 - **CSV support is compiled out.** The ConanCenter pre-built Arrow has `with_csv=False`, so `arrow_csv.cpp` / `view.cpp` gate the CSV reader/writer behind `PSP_ENABLE_CSV` (never defined). `UpdateData::Csv` and `View::to_csv` come back as engine errors; use `JsonRows` / `JsonColumns` / `Ndjson` / `Arrow`. Turning CSV on (`arrow/*:with_csv=True` in `conanfile.py`) changes Arrow's package_id and forces a from-source Arrow build — don't.
 - **Nested JSON columns**: every table is created with `list_flatten = stringify` (config `tables[].list_flatten`, default `stringify`), so an array in a column not listed in `stringify_columns` is stored as its JSON text — the pre-5.x behaviour, no row multiplication. Perspective 5.x's own default (`zip`) would silently expand such rows; `zip` / `cartesian` are opt-in per table. Nested *objects* still require `stringify_columns` (the engine rejects them).
 - **Static tables cannot have an `index`**: a source-less table is seeded from `[]` (empty schema), so the index column cannot exist; `create_static_tables` rejects the config with a clear error, like it does for `composite_index`.
@@ -445,6 +452,7 @@ What's been validated end-to-end vs. what's pending:
 | `cargo build` (incl. C++) | ✅ verified | inherited from arm64 | inherited (CI) | ✅ verified (Solace gated out) |
 | Perspective **5.3.1** engine build (Conan, all pre-built, hermetic stage) | — | — | lock evaluated from a Windows host (`graph info`): all pre-built, boost reports `Invalid` there (host-evaluation artifact; CI Verify step is the ground truth) | ✅ verified (2026-09) |
 | `tests/ws_roundtrip.rs` + `perspective` concurrent test on 5.3.1 | — | — | — | ✅ verified (2026-09) |
+| Perspective **5.5.1** engine build (Conan, all pre-built) + `cargo test --workspace` + `perspective` concurrent test | — | — | ✅ verified (2026-10, gcc 13, lock resolves 100% pre-built) | pending (CI) |
 | Solace ingress end-to-end | ✅ verified (500-msg burst) | — | — | ⊘ N/A (`solace-rs-sys` won't build on Windows; compiled out) |
 | NATS Core ingress end-to-end | ✅ verified | — | — | ✅ verified (table seeded; re-verified on 5.3.1, 2026-09: Python + Node sims, `ws_probe` reads 15 composite-key rows) |
 | NATS JetStream ingress end-to-end | ✅ verified | — | — | ✅ verified (stream-not-ready retry, then seeded; re-verified on 5.3.1, 2026-09: 25 indexed rows) |
