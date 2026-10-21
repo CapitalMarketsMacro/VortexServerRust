@@ -1,6 +1,6 @@
 # VortexServer
 
-High-performance WebSocket server for real-time data visualization, built on [Perspective](https://perspective.finos.org/) (engine **v5.5.1**, vendored under `Vortex/`) and [Axum](https://github.com/tokio-rs/axum).
+High-performance WebSocket server for real-time data visualization, built on [Perspective](https://perspective.finos.org/) (engine **v5.6.0**, vendored under `Vortex/`) and [Axum](https://github.com/tokio-rs/axum).
 
 VortexServer ingests streaming data from multiple transport protocols (NATS, Solace, WebSocket) and serves it to browser clients via `<perspective-viewer>` over WebSocket. Each table runs on an isolated C++ analytics engine instance with automatic supervision and restart.
 
@@ -101,6 +101,15 @@ const ws = new perspective.WebSocketClient("ws://localhost:4000/ws");
 const table = await ws.open_table("Orders");
 await viewer.load(table);
 ```
+
+> **Match the browser bundle to the engine version.** This server speaks the
+> Perspective **5.6** wire protocol; use `@perspective-dev/*` packages of the
+> same minor version. Perspective 5.6 replaced the expression-validation
+> message and renumbered the column-path response, so across a version
+> mismatch expression validation fails with an engine error and the column
+> paths of pivoted views come back empty; in `<perspective-viewer>` that is
+> expected to break the expression editor and pivoted-grid headers. Table
+> loading, views, `to_columns`/`to_json` and live updates are unaffected.
 
 > **Want to see data flow end-to-end without writing a publisher first?**
 > The repo ships a Solace broker (`docker-compose.yml`) and per-transport

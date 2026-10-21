@@ -11,7 +11,7 @@ on [Perspective](https://perspective.finos.org/) (a C++ analytics
 engine with Rust bindings). The Perspective engine lives in `Vortex/`
 as a dependency; the main application is at the repo root.
 
-The vendored engine is **Perspective v5.5.1** (`perspective`,
+The vendored engine is **Perspective v5.6.0** (`perspective`,
 `perspective-client`, `perspective-server` crates, taken from the crates.io
 tarballs) plus a small, documented set of local patches — see
 "Perspective fork: local patches & upgrade recipe" below before touching
@@ -128,7 +128,7 @@ perspective          (facade + Axum WebSocket server)
 
 ## Perspective fork: local patches & upgrade recipe
 
-`Vortex/crates/*` is upstream Perspective **v5.5.1** from the crates.io
+`Vortex/crates/*` is upstream Perspective **v5.6.0** from the crates.io
 tarballs (`https://static.crates.io/crates/<name>/<name>-<ver>.crate`), not
 a git subtree. Upstream builds its C++ deps from source with CMake
 ExternalProject; this repo replaces that with Conan pre-built binaries. The
@@ -167,7 +167,9 @@ upstream) is:
   `absl::string_view`); `view.cpp`'s `data_slice_to_arrow` only installs
   the LZ4 / ZSTD IPC codec when `arrow::util::Codec::Create` succeeds (see
   "Arrow IPC compression" under Key Patterns) instead of calling
-  `ValueUnsafe()` on an error `Result`.
+  `ValueUnsafe()` on an error `Result`. Upstream (still in 5.6.0) calls
+  `ValueUnsafe()` unconditionally, so this hunk must be re-applied on every
+  upgrade; `git merge-file` carries it over cleanly so far.
 - Rust (`src/ffi.rs`, `src/local_session.rs`, `src/server.rs`) — every call
   that takes the C++ server pointer (`ffi::Server::{new_session,
   handle_request, poll, close_session}`) is serialized through an
@@ -190,9 +192,11 @@ ConanCenter ships pre-built. When upstream bumps a pin (check
 needed `exprtk/0.0.3` for `vector_access_runtime_check`.
 
 **Upgrade recipe** (what was done for 4.3.0 / client 4.4.0 → 5.3.1, and
-again for 5.3.1 → 5.5.1, where every upstream hunk 3-way merged cleanly
-with `git merge-file <vendored> <old tarball> <new tarball>` and no Conan
-requirement changed):
+again for 5.3.1 → 5.5.1 and 5.5.1 → 5.6.0, where every upstream hunk 3-way
+merged cleanly with `git merge-file <vendored> <old tarball> <new tarball>`
+and no Conan requirement changed). On a Windows checkout (`autocrlf=true`)
+feed `git merge-file` the *blob* content (`git show HEAD:<path>`) as "ours",
+not the CRLF working-tree file, or every line conflicts:
 1. Download + extract the three tarballs for the target version into a
    scratch dir. Also keep the *current* upstream version's tarballs.
 2. `perspective-client`, `perspective`: delete and copy in wholesale, then
@@ -210,6 +214,10 @@ requirement changed):
    compiler reports. Expect only dependency-API drift: Arrow, re2, exprtk.
    Note `PSP_ENABLE_CSV` is never defined, so a botched CSV hunk is compiled
    out silently — diff `arrow_csv.cpp` / `view.cpp` against the tarball.
+   Then `git add -A Vortex/crates/` and check `git status --short | grep '^??'`
+   prints nothing: new upstream source files (5.6.0 added
+   `derived_source.{cpp,h}`) land on disk but `git commit -a` would not pick
+   them up, and CMake already lists them, so the commit would not build.
 5. If a Conan requirement changes, update the lockfile *incrementally* (see
    "Updating the lockfile") and verify every profile still resolves
    pre-built.
@@ -221,7 +229,7 @@ requirement changed):
 
 | Tool | Version | Why |
 |---|---|---|
-| Rust nightly-2026-01-01 | exact, pinned | `rust-toolchain.toml`; `rustfmt.toml` uses unstable features (import grouping, comment wrapping). Upstream 5.5.1 pins nightly-2026-06-01 but its crates build fine on this older nightly, so the enterprise toolchain pin is unchanged |
+| Rust nightly-2026-01-01 | exact, pinned | `rust-toolchain.toml`; `rustfmt.toml` uses unstable features (import grouping, comment wrapping). Upstream 5.6.0 pins nightly-2026-10-01 but its crates build fine on this older nightly, so the enterprise toolchain pin is unchanged |
 | Conan 2.x | latest | C++ dependency manager for Vortex/ |
 | CMake 3.20+ | latest | C++ build |
 | C++17 compiler | latest | Xcode (macOS), GCC/Clang (Linux), MSVC 2022 (Windows) |
@@ -433,7 +441,9 @@ When debugging an ingress problem, the workflow is: bring up the matching broker
 - **Lazy init**: `OnceLock` for `Client` and `Session` initialization in `LocalClient`/`LocalSession`. `TableSlot` also lazy-creates its table from the first ingress message (so schema is inferred from real data).
 - **Session IDs**: `u32` client_id assigned per FFI session, tracked in server's session map.
 - **`TableInitOptions` grows fields** (5.x added `page_to_disk`, `list_flatten`): always build it with `TableInitOptions::default()` + `set_name()` / field assignment, never a struct literal.
-- **Arrow IPC compression falls back to none.** The pre-built Arrow also has `with_lz4=False` / `with_zstd=False`, so `View::to_arrow` with `compression: "lz4"` / `"zstd"` (and the engine-internal LZ4 default used by `client.table(TableData::View(..))`) returns an *uncompressed* Arrow IPC stream — still valid Arrow, just larger. Enabling the codecs in `conanfile.py` changes Arrow's package_id and forces a source build — don't.
+- **Browser bundles must track the engine's minor version (5.6.x now).** Perspective 5.6 changed wire messages that `<perspective-viewer>` uses: `TableValidateExprReq/Resp` (field 9) was reserved and replaced by `TableDescribeReq/Resp` (41), `ViewColumnPathsResp` was renumbered (`paths=1` → `ColumnPathLevel area=2`), and `ViewPort` field 5 changed meaning (`emit_legacy_row_path_names` → `machine_column_names`). Across that boundary (a 5.4/5.5 viewer against this server, or a 5.6 viewer against a 5.5 server) the engine answers the unknown request with a per-request `server_error` reading `Unhandled request type 2` — the session and every other request keep working — so expression validation fails, and `column_paths()` decodes to an *empty* list with no error at all (prost skips unknown fields). In `<perspective-viewer>` that is expected to break the expression editor and the column headers of pivoted grids; the viewer is not vendored here, so this is inferred from the protocol, not tested. `open_table`, `view`, `to_columns`/`to_json`, `on_update`, `update`, `schema`, `size` are unchanged on the wire. Upgrade the server and the browser `@perspective-dev/*` packages together.
+- **5.6 engine semantics worth knowing** (all upstream, none configurable per table): in `to_arrow` output of a pivoted view (and in the schema of a derived `client.table(view)`) group-by key columns are named plainly — the `X (Group by N)` spelling is gone — and an aggregate whose name collides with a key is qualified (`X (sum)`); `machine_column_names=true` on the `to_arrow` request gives `__ROW_PATH_N__` keys instead. JSON output (`to_columns` / `to_json` / ndjson) is unchanged: `__ROW_PATH__` plus plain column names. `view.column_paths()` returns structured paths; `sum` of a group with no non-null values is now `null` (the new `sum or zero` aggregate, or the process-wide `PSP_SUM_EMPTY_ZERO=1` env var, restores `0`), and `sum not null` silently means plain `sum`; `client.table(view)` for a view of the same client is a live, *read-only* derived table maintained inside the engine (no Arrow round-trip; it rejects `index`/`limit` and pins its source view, which cannot be deleted while the derived table exists), while cross-client it still snapshots through `to_arrow` plus row-mode `on_update` deltas, both uncompressed unless the client asks for `compression`; `PSP_FORCE_REAGGREGATE=1` is a process-wide debugging switch; `PSP_FAST=1` in the env lowers the engine's C++ optimisation from `-O3` to `-O1` (the LTO flag it also clears is WASM-only; dev convenience — `build.rs` does not set it, but re-runs when it changes). `TableInitOptions` gained `schema` (explicit schema, only valid with `from_view` today).
+- **Arrow IPC compression falls back to none.** The pre-built Arrow also has `with_lz4=False` / `with_zstd=False`, so `View::to_arrow` with `compression: "lz4"` / `"zstd"` returns an *uncompressed* Arrow IPC stream (that request handler is the only `to_arrow` call site left in 5.6; 5.5's engine-internal LZ4 default for `table(view)` went away with derived tables) — still valid Arrow, just larger. Enabling the codecs in `conanfile.py` changes Arrow's package_id and forces a source build — don't.
 - **CSV support is compiled out.** The ConanCenter pre-built Arrow has `with_csv=False`, so `arrow_csv.cpp` / `view.cpp` gate the CSV reader/writer behind `PSP_ENABLE_CSV` (never defined). `UpdateData::Csv` and `View::to_csv` come back as engine errors; use `JsonRows` / `JsonColumns` / `Ndjson` / `Arrow`. Turning CSV on (`arrow/*:with_csv=True` in `conanfile.py`) changes Arrow's package_id and forces a from-source Arrow build — don't.
 - **Nested JSON columns**: every table is created with `list_flatten = stringify` (config `tables[].list_flatten`, default `stringify`), so an array in a column not listed in `stringify_columns` is stored as its JSON text — the pre-5.x behaviour, no row multiplication. Perspective 5.x's own default (`zip`) would silently expand such rows; `zip` / `cartesian` are opt-in per table. Nested *objects* still require `stringify_columns` (the engine rejects them).
 - **Static tables cannot have an `index`**: a source-less table is seeded from `[]` (empty schema), so the index column cannot exist; `create_static_tables` rejects the config with a clear error, like it does for `composite_index`.
@@ -452,7 +462,9 @@ What's been validated end-to-end vs. what's pending:
 | `cargo build` (incl. C++) | ✅ verified | inherited from arm64 | inherited (CI) | ✅ verified (Solace gated out) |
 | Perspective **5.3.1** engine build (Conan, all pre-built, hermetic stage) | — | — | lock evaluated from a Windows host (`graph info`): all pre-built, boost reports `Invalid` there (host-evaluation artifact; CI Verify step is the ground truth) | ✅ verified (2026-09) |
 | `tests/ws_roundtrip.rs` + `perspective` concurrent test on 5.3.1 | — | — | — | ✅ verified (2026-09) |
-| Perspective **5.5.1** engine build (Conan, all pre-built) + `cargo test --workspace` + `perspective` concurrent test | — | — | ✅ verified (2026-10, gcc 13, lock resolves 100% pre-built) | pending (CI) |
+| Perspective **5.5.1** engine build (Conan, all pre-built) + `cargo test --workspace` + `perspective` concurrent test | — | — | ✅ verified (2026-10, gcc 13, lock resolves 100% pre-built) | ✅ build: CI 2026-10-06 (the workflow has no test step); `ws_roundtrip` + `perspective` concurrent test + clippy + strict-offline build locally 2026-10-20 |
+| Perspective **5.6.0** engine build (Conan, all pre-built, hermetic stage) + `ws_roundtrip` (incl. pivoted view) + `perspective` concurrent test + strict-offline build | — | — | pending (CI) | ✅ verified (2026-10-20) |
+| NATS Core / JetStream / WebSocket ingress end-to-end on **5.6.0** (NATS: Python + Node sims, Core + JetStream; WebSocket: Python sim; `ws_probe` per table) | — | — | — | ✅ verified (2026-10-20) |
 | Solace ingress end-to-end | ✅ verified (500-msg burst) | — | — | ⊘ N/A (`solace-rs-sys` won't build on Windows; compiled out) |
 | NATS Core ingress end-to-end | ✅ verified | — | — | ✅ verified (table seeded; re-verified on 5.3.1, 2026-09: Python + Node sims, `ws_probe` reads 15 composite-key rows) |
 | NATS JetStream ingress end-to-end | ✅ verified | — | — | ✅ verified (stream-not-ready retry, then seeded; re-verified on 5.3.1, 2026-09: 25 indexed rows) |

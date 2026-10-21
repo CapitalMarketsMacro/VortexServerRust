@@ -9,13 +9,15 @@
 //! `main.rs`), per-session response routing, engine poll/flush after an
 //! update — without needing a browser or a broker.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
+use perspective::client::config::ViewConfigUpdate;
+use perspective::client::proto::ColumnType;
 use perspective::client::{
     Client, ClientError, ClientHandler, TableInitOptions, UpdateData, UpdateOptions, ViewWindow,
 };
@@ -166,6 +168,52 @@ async fn run() -> TestResult {
             ("b".to_string(), 2.5),
             ("c".to_string(), 3.5)
         ])
+    );
+
+    // --- pivoted view over the wire: schema() and to_columns() of a
+    // group_by view (Perspective 5.6 rebuilt view schema derivation and
+    // group-by column naming; this is what a <perspective-viewer> with a
+    // "Group by" configured asks the server for).
+    let group_cfg = ViewConfigUpdate {
+        group_by: Some(vec!["id".to_string()]),
+        ..ViewConfigUpdate::default()
+    };
+    let grouped = remote.view(Some(group_cfg.clone())).await?;
+    // `id` (string) takes the default `count` aggregate -> integer; `px`
+    // (float) takes `sum` -> float. An exact map catches a dropped, renamed
+    // or retyped column, not just a missing `px`.
+    let schema = grouped.schema().await?;
+    let expected: HashMap<String, ColumnType> = HashMap::from([
+        ("id".to_string(), ColumnType::Integer),
+        ("px".to_string(), ColumnType::Float),
+    ]);
+    assert_eq!(schema, expected, "pivoted view schema");
+    // `Table::describe` (new in 5.6) reports the same schema without building
+    // a view; it is the other consumer of the refactored derivation path.
+    let described = remote
+        .describe(group_cfg)
+        .await?
+        .unwrap_or_else(|e| panic!("describe rejected a valid group_by config: {e:?}"));
+    assert_eq!(
+        described.view_schema, expected,
+        "Table::describe view_schema"
+    );
+    assert!(
+        described.expression_schema.is_empty(),
+        "no expressions were configured: {:?}",
+        described.expression_schema
+    );
+    let columns: serde_json::Value =
+        serde_json::from_str(&grouped.to_columns_string(ViewWindow::default()).await?)?;
+    let row_paths = columns["__ROW_PATH__"]
+        .as_array()
+        .unwrap_or_else(|| panic!("pivoted to_columns has no __ROW_PATH__: {columns}"));
+    // total row + one group per distinct id
+    assert_eq!(row_paths.len(), 4, "{columns}");
+    assert_eq!(
+        columns["px"].as_array().map(|a| a.len()),
+        Some(4),
+        "{columns}"
     );
 
     pump.abort();

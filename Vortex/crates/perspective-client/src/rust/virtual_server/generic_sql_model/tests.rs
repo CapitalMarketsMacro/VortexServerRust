@@ -14,7 +14,8 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::config::{
-    Aggregate, GroupRollupMode, WindowFrame, WindowSort, WindowSortDir, WindowSpec, Windows,
+    Aggregate, Expressions, GroupRollupMode, Sort, SortDir, WindowFrame, WindowSort, WindowSortDir,
+    WindowSpec, Windows,
 };
 
 #[test]
@@ -1244,5 +1245,413 @@ fn test_table_make_view_grouping_fn_in_rollup_order() {
         !sql.contains("GROUPING_ID("),
         "should not use the default grouping fn: {}",
         sql
+    );
+}
+
+#[test]
+fn test_table_describe_flat() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("col1".to_string()), Some("col2".to_string())];
+    let sql = builder
+        .table_describe("source_table", &config, &IndexMap::new())
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        sql.starts_with(
+            "DESCRIBE (SELECT \"col1\" as \"col1\", \"col2\" as \"col2\" FROM source_table"
+        ),
+        "{sql}"
+    );
+    assert!(sql.ends_with(')'), "{sql}");
+}
+
+#[test]
+fn test_table_describe_no_columns_is_none() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.expressions = Expressions(HashMap::from([("e".to_string(), "\"a\" + 1".to_string())]));
+    assert!(
+        builder
+            .table_describe("source_table", &config, &IndexMap::new())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn test_table_describe_split_by_folds_into_group_by_without_pivot() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("value".to_string())];
+    config.group_by = vec!["state".to_string()];
+    config.split_by = vec!["quarter".to_string()];
+    config.aggregates = HashMap::from([(
+        "value".to_string(),
+        Aggregate::SingleAggregate("sum".to_string()),
+    )]);
+    config.sort = vec![Sort("value".to_string(), SortDir::Desc)];
+    let sql = builder
+        .table_describe("t", &config, &IndexMap::new())
+        .unwrap()
+        .unwrap();
+
+    assert!(!sql.contains("PIVOT"), "{sql}");
+    assert!(sql.contains("sum(\"value\") as \"value\""), "{sql}");
+    assert!(
+        sql.contains("GROUP BY ROLLUP(\"state\", \"quarter\")"),
+        "{sql}"
+    );
+    assert!(!sql.contains("__SORT_"), "{sql}");
+}
+
+#[test]
+fn test_table_describe_column_only_drops_aggregates() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("value".to_string())];
+    config.split_by = vec!["quarter".to_string()];
+    config.aggregates = HashMap::from([(
+        "value".to_string(),
+        Aggregate::SingleAggregate("avg".to_string()),
+    )]);
+    let sql = builder
+        .table_describe("t", &config, &IndexMap::new())
+        .unwrap()
+        .unwrap();
+
+    assert!(!sql.contains("PIVOT"), "{sql}");
+    assert!(sql.contains("any_value(\"value\") as \"value\""), "{sql}");
+    assert!(sql.contains("GROUP BY ROLLUP(\"quarter\")"), "{sql}");
+}
+
+#[test]
+fn test_table_describe_total_split_by_keeps_aggregates() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("value".to_string())];
+    config.split_by = vec!["quarter".to_string()];
+    config.group_rollup_mode = GroupRollupMode::Total;
+    config.aggregates = HashMap::from([(
+        "value".to_string(),
+        Aggregate::SingleAggregate("avg".to_string()),
+    )]);
+    let sql = builder
+        .table_describe("t", &config, &IndexMap::new())
+        .unwrap()
+        .unwrap();
+
+    assert!(!sql.contains("PIVOT"), "{sql}");
+    assert!(sql.contains("avg(\"value\") as \"value\""), "{sql}");
+    assert!(!sql.contains("GROUP BY"), "{sql}");
+    assert!(!sql.contains("__GROUPING_ID__"), "{sql}");
+    assert!(!sql.contains("ORDER BY"), "{sql}");
+}
+
+#[test]
+fn test_expressions_describe() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    assert!(
+        builder
+            .expressions_describe("t", &config)
+            .unwrap()
+            .is_none()
+    );
+    config.expressions = Expressions(HashMap::from([
+        ("b".to_string(), "\"x\" * 2".to_string()),
+        ("a".to_string(), "\"x\" + 1".to_string()),
+    ]));
+
+    assert_eq!(
+        builder.expressions_describe("t", &config).unwrap().unwrap(),
+        "DESCRIBE (SELECT \"x\" + 1 AS \"a\", \"x\" * 2 AS \"b\" FROM t)"
+    );
+}
+
+#[test]
+fn test_expression_describe_uses_template() {
+    let builder = GenericSQLVirtualServerModel::new(
+        serde_json::from_value(serde_json::json!({
+            "describe_template": "SELECT * FROM ({}) AS __psp_describe__ LIMIT 0"
+        }))
+        .unwrap(),
+    );
+
+    assert_eq!(
+        builder.expression_describe("t", "\"x\" + 1").unwrap(),
+        "SELECT * FROM (SELECT \"x\" + 1 FROM t) AS __psp_describe__ LIMIT 0"
+    );
+}
+
+#[test]
+fn test_view_get_data_escapes_double_quotes_in_column_paths() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("amount".to_string())];
+    config.split_by = vec!["item_title".to_string()];
+    let viewport = ViewPort::default();
+
+    let mut schema = IndexMap::new();
+    schema.insert("plain|amount".to_string(), ColumnType::Integer);
+    schema.insert("say \"hi\"|amount".to_string(), ColumnType::Integer);
+    let sql = builder
+        .view_get_data("my_view", &config, &viewport, &schema)
+        .unwrap();
+
+    assert_eq!(
+        sql,
+        "SELECT \"plain|amount\", \"say \"\"hi\"\"|amount\" FROM my_view"
+    );
+}
+
+#[test]
+fn test_view_get_min_max_escapes_double_quotes_in_column_name() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let config = ViewConfig::default();
+
+    assert_eq!(
+        builder
+            .view_get_min_max("my_view", "say \"hi\"|amount", &config)
+            .unwrap(),
+        "SELECT MIN(\"say \"\"hi\"\"|amount\"), MAX(\"say \"\"hi\"\"|amount\") FROM my_view"
+    );
+}
+
+fn view_make_table_schema() -> IndexMap<String, ColumnType> {
+    IndexMap::from([
+        ("__GROUPING_ID__".to_string(), ColumnType::Integer),
+        ("__ROW_PATH_0__".to_string(), ColumnType::String),
+        ("Mon|x".to_string(), ColumnType::Float),
+        ("Tue|x".to_string(), ColumnType::Float),
+    ])
+}
+
+#[test]
+fn test_view_make_table_flat() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let schema = IndexMap::from([
+        ("a".to_string(), ColumnType::Integer),
+        ("b".to_string(), ColumnType::String),
+    ]);
+
+    assert_eq!(
+        builder
+            .view_make_table("v", "t", &ViewConfig::default(), &schema, None)
+            .unwrap(),
+        "CREATE TABLE t AS (SELECT \"a\", \"b\" FROM v)"
+    );
+}
+
+#[test]
+fn test_table_make_view_escapes_double_quotes_in_column_names() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("a\"b".to_string())];
+    let sql = builder
+        .table_make_view("source_table", "dest_view", &config, &IndexMap::new())
+        .unwrap();
+
+    assert!(
+        sql.contains("\"a\"\"b\" as \"a\"\"b\""),
+        "expected escaped column identifier: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("\"a\"b\""),
+        "expected no unescaped column identifier: {}",
+        sql
+    );
+}
+
+#[test]
+fn test_view_make_table_unrolls_row_path() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.group_by = vec!["g".to_string()];
+    config.split_by = vec!["s".to_string()];
+    assert_eq!(
+        builder
+            .view_make_table("v", "t", &config, &view_make_table_schema(), None)
+            .unwrap(),
+        "CREATE TABLE t AS (SELECT \"__ROW_PATH_0__\" AS \"g\", \"Mon|x\", \"Tue|x\" FROM v)"
+    );
+}
+
+#[test]
+fn test_table_make_view_escapes_double_quotes_in_group_by() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("value".to_string())];
+    config.group_by = vec!["ca\"t".to_string()];
+    config.group_rollup_mode = GroupRollupMode::Flat;
+    let sql = builder
+        .table_make_view("source_table", "dest_view", &config, &IndexMap::new())
+        .unwrap();
+
+    assert!(
+        sql.contains("GROUP BY \"ca\"\"t\""),
+        "expected escaped group_by identifier: {}",
+        sql
+    );
+}
+
+#[test]
+fn test_table_make_view_escapes_double_quotes_in_split_by() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("value".to_string())];
+    config.group_by = vec!["category".to_string()];
+    config.split_by = vec!["sta\"te".to_string()];
+    let sql = builder
+        .table_make_view("source_table", "dest_view", &config, &IndexMap::new())
+        .unwrap();
+
+    assert!(
+        sql.contains("\"sta\"\"te\" || '|value'"),
+        "expected escaped split_by identifier in ON expression: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("\"sta\"te\""),
+        "expected no unescaped split_by identifier: {}",
+        sql
+    );
+}
+
+#[test]
+fn test_view_get_data_orders_column_paths_containing_separator() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.columns = vec![Some("amount".to_string()), Some("qty".to_string())];
+    config.split_by = vec!["item_title".to_string()];
+    let viewport = ViewPort::default();
+
+    let mut schema = IndexMap::new();
+    schema.insert("b|c|qty".to_string(), ColumnType::Integer);
+    schema.insert("a|b|amount".to_string(), ColumnType::Integer);
+    schema.insert("b|c|amount".to_string(), ColumnType::Integer);
+    schema.insert("a|b|qty".to_string(), ColumnType::Integer);
+    let sql = builder
+        .view_get_data("my_view", &config, &viewport, &schema)
+        .unwrap();
+
+    assert_eq!(
+        sql,
+        "SELECT \"a|b|amount\", \"a|b|qty\", \"b|c|amount\", \"b|c|qty\" FROM my_view"
+    );
+}
+
+#[test]
+fn test_view_make_table_explicit_schema() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.group_by = vec!["g".to_string()];
+    config.split_by = vec!["s".to_string()];
+    let declared = IndexMap::from([
+        ("g".to_string(), ColumnType::String),
+        ("Tue|x".to_string(), ColumnType::Float),
+        ("Wed|x".to_string(), ColumnType::Float),
+    ]);
+
+    assert_eq!(
+        builder
+            .view_make_table(
+                "v",
+                "t",
+                &config,
+                &view_make_table_schema(),
+                Some(&declared)
+            )
+            .unwrap(),
+        "CREATE TABLE t AS (SELECT \"__ROW_PATH_0__\" AS \"g\", \"Tue|x\", CAST(NULL AS DOUBLE \
+         PRECISION) AS \"Wed|x\" FROM v)"
+    );
+}
+
+#[test]
+fn test_view_make_table_rejects_type_mismatch() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let declared = IndexMap::from([("Mon|x".to_string(), ColumnType::String)]);
+    assert!(
+        builder
+            .view_make_table(
+                "v",
+                "t",
+                &ViewConfig::default(),
+                &view_make_table_schema(),
+                Some(&declared)
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn test_view_make_table_qualifies_aggregate_of_key() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.group_by = vec!["x".to_string()];
+    config.split_by = vec!["s".to_string()];
+    config.columns = vec![Some("x".to_string())];
+    let view_schema = IndexMap::from([
+        ("__GROUPING_ID__".to_string(), ColumnType::Integer),
+        ("__ROW_PATH_0__".to_string(), ColumnType::Float),
+        ("Mon|x".to_string(), ColumnType::Float),
+    ]);
+
+    assert_eq!(
+        builder
+            .view_make_table("v", "t", &config, &view_schema, None)
+            .unwrap(),
+        "CREATE TABLE t AS (SELECT \"__ROW_PATH_0__\" AS \"x\", \"Mon|x\" AS \"Mon|x (sum)\" FROM \
+         v)"
+    );
+
+    config.aggregates.insert(
+        "x".to_string(),
+        crate::config::Aggregate::from("weighted mean by w"),
+    );
+
+    assert_eq!(
+        builder
+            .view_make_table("v", "t", &config, &view_schema, None)
+            .unwrap(),
+        "CREATE TABLE t AS (SELECT \"__ROW_PATH_0__\" AS \"x\", \"Mon|x\" AS \"Mon|x (weighted \
+         mean by w)\" FROM v)"
+    );
+}
+
+#[test]
+fn test_view_make_table_explicit_schema_addresses_qualified_aggregate() {
+    let builder = GenericSQLVirtualServerModel::new(GenericSQLVirtualServerModelArgs::default());
+    let mut config = ViewConfig::default();
+    config.group_by = vec!["x".to_string()];
+    config.split_by = vec!["s".to_string()];
+    config.columns = vec![Some("x".to_string())];
+    let view_schema = IndexMap::from([
+        ("__GROUPING_ID__".to_string(), ColumnType::Integer),
+        ("__ROW_PATH_0__".to_string(), ColumnType::Float),
+        ("Mon|x".to_string(), ColumnType::Float),
+    ]);
+
+    let declared = IndexMap::from([
+        ("x".to_string(), ColumnType::Float),
+        ("Mon|x (sum)".to_string(), ColumnType::Float),
+    ]);
+
+    assert_eq!(
+        builder
+            .view_make_table("v", "t", &config, &view_schema, Some(&declared))
+            .unwrap(),
+        "CREATE TABLE t AS (SELECT \"__ROW_PATH_0__\" AS \"x\", \"Mon|x\" AS \"Mon|x (sum)\" FROM \
+         v)"
+    );
+
+    let mismatched = IndexMap::from([("Mon|x (sum)".to_string(), ColumnType::String)]);
+    assert!(
+        builder
+            .view_make_table("v", "t", &config, &view_schema, Some(&mismatched))
+            .is_err()
     );
 }

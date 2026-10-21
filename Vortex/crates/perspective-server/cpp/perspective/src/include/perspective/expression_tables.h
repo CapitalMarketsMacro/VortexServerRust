@@ -51,7 +51,8 @@ struct t_expression_tables {
 
     void clear_transitional_tables() const;
 
-    // Calculate the `t_transitions` value for each row.
+    /// Calculates the `t_transitions` value for each row and clears the
+    /// `m_prev` cells of rows that did not exist before this update.
     void calculate_transitions(const std::shared_ptr<t_data_table>& existed);
 
     void set_flattened(const std::shared_ptr<t_data_table>& flattened) const;
@@ -68,7 +69,6 @@ struct t_expression_tables {
     std::shared_ptr<t_data_table> m_flattened;
     std::shared_ptr<t_data_table> m_prev;
     std::shared_ptr<t_data_table> m_current;
-    std::shared_ptr<t_data_table> m_delta;
     std::shared_ptr<t_data_table> m_transitions;
 };
 

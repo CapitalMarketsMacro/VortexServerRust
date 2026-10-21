@@ -527,6 +527,21 @@ fn cmake_link_deps(cmake_build_dir: &Path) -> Result<(), std::io::Error> {
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
+    // cpp/perspective/CMakeLists.txt reads these from the environment at
+    // configure time (PSP_FAST -> -O1 engine, PSP_DEBUG -> DEBUG build type,
+    // PSP_HEAP_INSTRUMENTS, PSP_USE_CCACHE / PSP_CCACHE_BINARY, PSP_MANYLINUX).
+    // always_configure is on, so tracking them is enough for a toggle to
+    // reconfigure and rebuild the engine instead of being silently ignored.
+    for var in [
+        "PSP_FAST",
+        "PSP_DEBUG",
+        "PSP_HEAP_INSTRUMENTS",
+        "PSP_USE_CCACHE",
+        "PSP_CCACHE_BINARY",
+        "PSP_MANYLINUX",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
     Ok(())
 }
 

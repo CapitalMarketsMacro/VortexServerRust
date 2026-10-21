@@ -375,31 +375,7 @@ View<t_ctxunit>::column_names_range(
 
 template <typename CTX_T>
 std::vector<std::vector<t_tscalar>>
-View<CTX_T>::column_paths() const {
-    auto num_column_pivots = m_column_pivots.size();
-    auto names = column_names(true, num_column_pivots);
-    if (!m_hidden_sort.empty()) {
-        // make a new vector so we don't have to erase while iterating
-        std::vector<std::vector<t_tscalar>> visible_column_paths;
-
-        for (const auto& column : names) {
-            // Remove undisplayed column names used to sort
-            std::string name = column.back().to_string();
-            if (std::find(m_hidden_sort.begin(), m_hidden_sort.end(), name)
-                == m_hidden_sort.end()) {
-                visible_column_paths.push_back(column);
-            }
-        }
-
-        return visible_column_paths;
-    }
-
-    return names;
-}
-
-template <typename CTX_T>
-std::vector<std::vector<t_tscalar>>
-View<CTX_T>::column_paths_range(t_uindex start_col, t_uindex end_col) const {
+View<CTX_T>::column_paths(t_uindex start_col, t_uindex end_col) const {
     auto num_column_pivots = m_column_pivots.size();
     auto names =
         column_names_range(true, num_column_pivots, start_col, end_col);
@@ -416,26 +392,91 @@ View<CTX_T>::column_paths_range(t_uindex start_col, t_uindex end_col) const {
             }
         }
 
-        return visible_column_paths;
+        names = std::move(visible_column_paths);
     }
 
-    return names;
-}
+    const auto depth = num_column_pivots + 1;
+    std::vector<std::vector<t_tscalar>> area(
+        depth, std::vector<t_tscalar>(names.size(), mknone())
+    );
 
-template <typename CTX_T>
-std::vector<std::vector<std::string>>
-View<CTX_T>::column_paths_string() const {
-    auto paths = column_paths();
-    std::vector<std::vector<std::string>> out;
-    out.reserve(paths.size());
-    for (const auto& path : paths) {
-        std::vector<std::string> row;
-        row.reserve(path.size());
-        for (const auto& c : path) {
-            row.push_back(c.to_string());
+    for (t_uindex col = 0; col < names.size(); ++col) {
+        const auto& path = names[col];
+        if (path.empty()) {
+            continue;
         }
 
-        out.push_back(row);
+        for (t_uindex level = 0; level + 1 < path.size(); ++level) {
+            area[level][col] = path[level];
+        }
+
+        area[depth - 1][col] = path.back();
+    }
+
+    return area;
+}
+
+static std::string
+map_aggregate_type(t_aggtype agg, const std::string& typestring) {
+    switch (agg) {
+        case AGGTYPE_DISTINCT_COUNT:
+        case AGGTYPE_COUNT: {
+            return "integer";
+        } break;
+        case AGGTYPE_MEAN:
+        case AGGTYPE_MEAN_BY_COUNT:
+        case AGGTYPE_WEIGHTED_MEAN:
+        case AGGTYPE_PCT_SUM_PARENT:
+        case AGGTYPE_PCT_SUM_GRAND_TOTAL:
+        case AGGTYPE_VARIANCE:
+        case AGGTYPE_STANDARD_DEVIATION: {
+            return "float";
+        } break;
+        default: {
+            return typestring;
+        } break;
+    }
+}
+
+std::map<std::string, std::string>
+describe_view_schema(
+    const t_view_config& config, const t_schema& schema, bool pivoted
+) {
+    std::map<std::string, std::string> out;
+    const auto type_of = [&schema](const std::string& name) {
+        return dtype_to_str(
+            schema.has_column(name) ? schema.get_dtype(name) : DTYPE_NONE
+        );
+    };
+
+    if (!pivoted) {
+        for (const auto& name : config.get_columns()) {
+            if (name == "psp_okey") {
+                continue;
+            }
+
+            out[name] = type_of(name);
+        }
+
+        return out;
+    }
+
+    const bool map_types =
+        (!config.get_row_pivots().empty() || config.is_total_only())
+        && (!config.is_column_only() || config.is_total_only());
+
+    for (const t_aggspec& agg : config.get_aggspecs()) {
+        const std::string& name = agg.name();
+        if (name == "psp_okey") {
+            continue;
+        }
+
+        std::string type_str = type_of(name);
+        if (map_types) {
+            type_str = map_aggregate_type(agg.agg(), type_str);
+        }
+
+        out[name] = type_str;
     }
 
     return out;
@@ -444,84 +485,19 @@ View<CTX_T>::column_paths_string() const {
 template <typename CTX_T>
 std::map<std::string, std::string>
 View<CTX_T>::schema() const {
-    // TODO: should revert to m_table
-    auto schema = m_ctx->get_schema();
-    auto _types = schema.types();
-    auto names = schema.columns();
-
-    std::map<std::string, t_dtype> types;
-    std::map<std::string, std::string> new_schema;
-
-    for (std::size_t i = 0, max = names.size(); i != max; ++i) {
-        types[names[i]] = _types[i];
-    }
-
-    auto col_names = column_names(false);
-    for (const std::vector<t_tscalar>& name : col_names) {
-        // Pull out the main aggregate column
-        std::string agg_name = name.back().to_string();
-        std::string type_string = dtype_to_str(types[agg_name]);
-        new_schema[agg_name] = type_string;
-
-        if ((!m_row_pivots.empty() || m_view_config->is_total_only()) && (!is_column_only() || m_view_config->is_total_only())) {
-            new_schema[agg_name] =
-                _map_aggregate_types(agg_name, new_schema[agg_name]);
-        }
-    }
-
-    return new_schema;
+    return describe_view_schema(*m_view_config, m_ctx->get_schema(), true);
 }
 
 template <>
 std::map<std::string, std::string>
 View<t_ctxunit>::schema() const {
-    t_schema schema = m_ctx->get_schema();
-    std::vector<t_dtype> _types = schema.types();
-    std::vector<std::string> names = schema.columns();
-
-    std::map<std::string, t_dtype> types;
-    for (std::size_t i = 0, max = names.size(); i != max; ++i) {
-        types[names[i]] = _types[i];
-    }
-
-    std::vector<std::vector<t_tscalar>> cols = column_names(false);
-    std::map<std::string, std::string> new_schema;
-
-    for (auto& col : cols) {
-        std::string name = col.back().to_string();
-        if (name == "psp_okey") {
-            continue;
-        }
-        new_schema[name] = dtype_to_str(types[name]);
-    }
-
-    return new_schema;
+    return describe_view_schema(*m_view_config, m_ctx->get_schema(), false);
 }
 
 template <>
 std::map<std::string, std::string>
 View<t_ctx0>::schema() const {
-    const t_schema& schema = m_ctx->get_schema();
-    const std::vector<t_dtype>& _types = schema.types();
-    const std::vector<std::string>& names = schema.columns();
-
-    std::map<std::string, t_dtype> types;
-    for (std::size_t i = 0, max = names.size(); i != max; ++i) {
-        types[names[i]] = _types[i];
-    }
-
-    std::vector<std::vector<t_tscalar>> cols = column_names(false);
-    std::map<std::string, std::string> new_schema;
-
-    for (auto& col : cols) {
-        std::string name = col.back().to_string();
-        if (name == "psp_okey") {
-            continue;
-        }
-        new_schema[name] = dtype_to_str(types[name]);
-    }
-
-    return new_schema;
+    return describe_view_schema(*m_view_config, m_ctx->get_schema(), false);
 }
 
 template <typename CTX_T>
@@ -799,7 +775,7 @@ View<CTX_T>::to_arrow(
     std::int32_t end_col,
     bool emit_group_by,
     t_arrow_compression compression,
-    bool emit_legacy_row_path_names
+    bool machine_column_names
 ) const {
     PSP_GIL_UNLOCK();
     PSP_READ_LOCK(*get_lock());
@@ -807,7 +783,7 @@ View<CTX_T>::to_arrow(
     std::shared_ptr<t_data_slice<CTX_T>> data_slice =
         get_data(start_row, end_row, start_col, end_col);
     return data_slice_to_arrow(
-        data_slice, emit_group_by, compression, emit_legacy_row_path_names
+        data_slice, emit_group_by, compression, machine_column_names
     );
 };
 
@@ -873,7 +849,7 @@ template <typename CTX_T>
 std::pair<std::shared_ptr<arrow::Schema>, std::shared_ptr<arrow::RecordBatch>>
 View<CTX_T>::data_slice_to_batches(
     bool emit_group_by, std::shared_ptr<t_data_slice<CTX_T>> data_slice,
-    bool emit_legacy_row_path_names
+    bool machine_column_names
 ) const {
     // From the data slice, get all the metadata we need
     t_get_data_extents extents = data_slice->get_data_extents();
@@ -903,13 +879,8 @@ View<CTX_T>::data_slice_to_batches(
         auto schema = m_table->get_schema();
         for (auto rpidx = 0; rpidx < num_row_paths; ++rpidx) {
             std::string column_name = row_pivots.at(rpidx);
-            std::string row_path_name;
-            if (emit_legacy_row_path_names) {
-                row_path_name = column_name;
-                row_path_name += " (Group by ";
-                row_path_name += std::to_string(rpidx + 1);
-                row_path_name += ")";
-            } else {
+            std::string row_path_name = column_name;
+            if (machine_column_names) {
                 row_path_name = "__ROW_PATH_";
                 row_path_name += std::to_string(rpidx);
                 row_path_name += "__";
@@ -1208,6 +1179,22 @@ View<CTX_T>::data_slice_to_batches(
     const std::vector<t_uindex>& slice_col_indices =
         data_slice->get_column_indices();
 
+    const auto aggspecs = m_view_config->get_aggspecs();
+    auto leaf_name = [&](const t_tscalar& leaf) -> std::string {
+        std::string name = leaf.to_string();
+        if (machine_column_names || !emit_group_by) {
+            return name;
+        }
+
+        for (const auto& spec : aggspecs) {
+            if (spec.name() == name) {
+                return m_view_config->readable_aggregate_name(spec);
+            }
+        }
+
+        return name;
+    };
+
     parallel_for(int(indices.size()), [&](auto iidx) {
         // for (auto iidx = 0; iidx < indices.size(); iidx++) {
         auto ccidx = iidx + num_output_row_paths;
@@ -1230,10 +1217,12 @@ View<CTX_T>::data_slice_to_batches(
 
         std::string name;
 
-        if (num_sides > 1) {
-            name = join_column_names(col_path, m_separator);
+        if (num_sides > 1 && col_path.size() > 1) {
+            std::vector<t_tscalar> prefix(col_path.begin(), col_path.end() - 1);
+            name = join_column_names(prefix, m_separator) + m_separator
+                + leaf_name(col_path.back());
         } else {
-            name = col_path.at(col_path.size() - 1).to_string();
+            name = leaf_name(col_path.back());
         }
 
         std::shared_ptr<arrow::Array> arr;
@@ -1421,12 +1410,12 @@ View<CTX_T>::data_slice_to_arrow(
     std::shared_ptr<t_data_slice<CTX_T>> data_slice,
     bool emit_group_by,
     t_arrow_compression compression,
-    bool emit_legacy_row_path_names
+    bool machine_column_names
 ) const {
     std::pair<
         std::shared_ptr<arrow::Schema>,
         std::shared_ptr<arrow::RecordBatch>>
-        pairs = data_slice_to_batches(emit_group_by, data_slice, emit_legacy_row_path_names);
+        pairs = data_slice_to_batches(emit_group_by, data_slice, machine_column_names);
     std::shared_ptr<arrow::RecordBatch> batches = pairs.second;
     std::shared_ptr<arrow::Schema> arrow_schema = pairs.first;
     arrow::Result<std::shared_ptr<arrow::ResizableBuffer>> allocated =
@@ -1773,27 +1762,9 @@ std::string
 View<CTX_T>::_map_aggregate_types(
     const std::string& name, const std::string& typestring
 ) const {
-
     for (const t_aggspec& agg : m_aggregates) {
         if (agg.name() == name) {
-            switch (agg.agg()) {
-                case AGGTYPE_DISTINCT_COUNT:
-                case AGGTYPE_COUNT: {
-                    return "integer";
-                } break;
-                case AGGTYPE_MEAN:
-                case AGGTYPE_MEAN_BY_COUNT:
-                case AGGTYPE_WEIGHTED_MEAN:
-                case AGGTYPE_PCT_SUM_PARENT:
-                case AGGTYPE_PCT_SUM_GRAND_TOTAL:
-                case AGGTYPE_VARIANCE:
-                case AGGTYPE_STANDARD_DEVIATION: {
-                    return "float";
-                } break;
-                default: {
-                    return typestring;
-                } break;
-            }
+            return map_aggregate_type(agg.agg(), typestring);
         }
     }
 
