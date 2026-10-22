@@ -262,7 +262,7 @@ fn window_sql(
     }
 }
 
-fn quote_ident(name: &str) -> String {
+pub(crate) fn quote_ident(name: &str) -> String {
     name.replace('"', "\"\"")
 }
 
@@ -332,7 +332,7 @@ impl<'a> ViewQueryContext<'a> {
             expressions
                 .get(col)
                 .cloned()
-                .unwrap_or_else(|| format!("\"{}\"", col))
+                .unwrap_or_else(|| format!("\"{}\"", quote_ident(col)))
         };
 
         let row_id_expr = model.0.row_id_expr.as_deref().unwrap_or("rowid");
@@ -702,7 +702,7 @@ impl<'a> ViewQueryContext<'a> {
             .0
             .get(col)
             .cloned()
-            .unwrap_or_else(|| format!("\"{}\"", col))
+            .unwrap_or_else(|| format!("\"{}\"", quote_ident(col)))
     }
 
     fn get_aggregate(&self, col: &str) -> String {
@@ -991,7 +991,7 @@ impl<'a> ViewQueryContext<'a> {
         self.config
             .split_by
             .iter()
-            .map(|c| format!("\"{}\"", c))
+            .map(|c| format!("\"{}\"", quote_ident(c)))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -1022,7 +1022,8 @@ impl<'a> ViewQueryContext<'a> {
                 .iter()
                 .any(|Sort(_, dir)| *dir != SortDir::None && !is_col_sort(dir));
             if self.config.group_by.len() > 1 && has_row_sort {
-                // Hierarchical flat sort — mirrors rollup logic but without GROUPING_ID
+                // Hierarchical flat sort — mirrors rollup logic but without
+                // GROUPING_ID
                 for gidx in 0..self.config.group_by.len() {
                     let is_leaf = gidx >= self.config.group_by.len() - 1;
                     for (sidx, Sort(sort_col, sort_dir)) in self.config.sort.iter().enumerate() {

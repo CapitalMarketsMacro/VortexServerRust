@@ -1,6 +1,6 @@
 # Perspective Native
 
-Self-contained C++ engine + Rust bindings for [Perspective](https://perspective.finos.org/), using Conan for C++ dependency management.
+Self-contained C++ engine + Rust bindings for [Perspective](https://perspective.finos.org/) **v5.6.0**, using Conan for C++ dependency management (all pre-built binaries; the local patch list and upgrade recipe are in the repo-root `CLAUDE.md`).
 
 ## Prerequisites
 

@@ -45,7 +45,7 @@ use crate::config::{
     FilterTerm, GroupRollupMode, Scalar, Sort, SortDir, SplitRollupMode, ViewConfig,
 };
 use crate::proto::{ColumnType, ViewPort};
-use crate::virtual_server::generic_sql_model::table_make_view::ViewQueryContext;
+use crate::virtual_server::generic_sql_model::table_make_view::{ViewQueryContext, quote_ident};
 
 /// Error type for SQL generation operations.
 #[derive(Debug, Clone)]
@@ -56,6 +56,17 @@ pub enum GenericSQLError {
     InvalidConfig(String),
     /// An unsupported operation was requested.
     UnsupportedOperation(String),
+}
+
+fn sql_type(ty: ColumnType) -> &'static str {
+    match ty {
+        ColumnType::String => "VARCHAR",
+        ColumnType::Integer => "INTEGER",
+        ColumnType::Float => "DOUBLE PRECISION",
+        ColumnType::Boolean => "BOOLEAN",
+        ColumnType::Date => "DATE",
+        ColumnType::Datetime => "TIMESTAMP",
+    }
 }
 
 impl fmt::Display for GenericSQLError {
@@ -117,6 +128,10 @@ pub struct GenericSQLVirtualServerModelArgs {
     /// ClickHouse (both RE2, matching the engine's semantics). When
     /// omitted, regex filter clauses are dropped.
     regex_fn: Option<String>,
+
+    /// Template wrapping a `SELECT` so the dialect PLANS it and reports its
+    /// result columns without executing it; `{}` is the query.
+    describe_template: Option<String>,
 }
 
 /// Recovers the source column of a pivoted view column name — the longest
@@ -224,23 +239,88 @@ impl GenericSQLVirtualServerModel {
         Ok(format!("SELECT COUNT(*) FROM (DESCRIBE {})", view_id))
     }
 
-    /// Returns the SQL query to validate an expression against a table.
+    fn describe_wrap(&self, query: &str) -> String {
+        self.0
+            .describe_template
+            .as_deref()
+            .unwrap_or("DESCRIBE ({})")
+            .replacen("{}", query, 1)
+    }
+
+    /// Returns the SQL query that plans every expression of `config` at once
+    /// against `table_id`.
     ///
-    /// # Arguments
-    /// * `table_id` - The identifier of the table.
-    /// * `expression` - The SQL expression to validate.
+    /// # Returns
+    /// SQL: `DESCRIBE (SELECT {expr} AS "{alias}", ... FROM {table_id})`
+    pub fn expressions_describe(
+        &self,
+        table_id: &str,
+        config: &ViewConfig,
+    ) -> GenericSQLResult<Option<String>> {
+        if config.expressions.is_empty() {
+            return Ok(None);
+        }
+
+        let mut names = config.expressions.keys().collect::<Vec<_>>();
+        names.sort();
+        let selects = names
+            .iter()
+            .map(|name| {
+                format!(
+                    "{} AS \"{}\"",
+                    config.expressions.0[*name],
+                    quote_ident(name)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        Ok(Some(self.describe_wrap(&format!(
+            "SELECT {} FROM {}",
+            selects, table_id
+        ))))
+    }
+
+    /// Returns the SQL query that plans one expression against a table.
     ///
     /// # Returns
     /// SQL: `DESCRIBE (SELECT {expression} FROM {table_id})`
-    pub fn table_validate_expression(
+    pub fn expression_describe(
         &self,
         table_id: &str,
         expression: &str,
     ) -> GenericSQLResult<String> {
-        Ok(format!(
-            "DESCRIBE (SELECT {} FROM {})",
-            expression, table_id
-        ))
+        Ok(self.describe_wrap(&format!("SELECT {} FROM {}", expression, table_id)))
+    }
+
+    /// Returns the SQL query that plans the view `config` would build against
+    /// `table_id`, without materializing it.
+    ///
+    /// # Returns
+    /// SQL: `DESCRIBE (SELECT ... GROUP BY ...)`
+    pub fn table_describe(
+        &self,
+        table_id: &str,
+        config: &ViewConfig,
+        schema: &IndexMap<String, ColumnType>,
+    ) -> GenericSQLResult<Option<String>> {
+        if config.columns.iter().flatten().next().is_none() {
+            return Ok(None);
+        }
+
+        let mut folded = config.clone();
+        folded.sort.clear();
+        let split_by = std::mem::take(&mut folded.split_by);
+        if !split_by.is_empty() && folded.group_rollup_mode != GroupRollupMode::Total {
+            if folded.group_by.is_empty() {
+                folded.aggregates.clear();
+            }
+
+            folded.group_by.extend(split_by);
+        }
+
+        let ctx = ViewQueryContext::new(self, table_id, &folded, schema)?;
+        Ok(Some(self.describe_wrap(&ctx.build_query())))
     }
 
     /// Returns the SQL query to delete a view.
@@ -278,6 +358,94 @@ impl GenericSQLVirtualServerModel {
         let query = ctx.build_query();
         let template = self.0.create_entity.as_deref().unwrap_or("TABLE");
         Ok(format!("CREATE {} {} AS ({})", template, view_id, query))
+    }
+
+    /// Returns the SQL query to create a table from a view, with the view's
+    /// row path unrolled into key columns named after their `group_by`
+    /// columns and aggregates of those columns qualified by their aggregate.
+    ///
+    /// # Arguments
+    /// * `view_id` - The identifier of the source view.
+    /// * `table_id` - The identifier for the new table.
+    /// * `config` - The configuration the view was created with.
+    /// * `view_schema` - The schema of the view's relation.
+    /// * `schema` - The columns of the new table, in place of the view's.
+    ///
+    /// # Returns
+    /// SQL: `CREATE TABLE {table_id} AS (SELECT ... FROM {view_id})`
+    pub fn view_make_table(
+        &self,
+        view_id: &str,
+        table_id: &str,
+        config: &ViewConfig,
+        view_schema: &IndexMap<String, ColumnType>,
+        schema: Option<&IndexMap<String, ColumnType>>,
+    ) -> GenericSQLResult<String> {
+        let key_types: IndexMap<&str, ColumnType> = config
+            .group_by
+            .iter()
+            .enumerate()
+            .filter_map(|(i, col)| {
+                view_schema
+                    .get(&format!("__ROW_PATH_{}__", i))
+                    .map(|ty| (col.as_str(), *ty))
+            })
+            .collect();
+
+        let mut selectable: IndexMap<String, (String, Option<ColumnType>)> = config
+            .group_by
+            .iter()
+            .enumerate()
+            .map(|(i, col)| (col.clone(), (format!("\"__ROW_PATH_{}__\"", i), None)))
+            .collect();
+
+        for (name, ty) in view_schema
+            .iter()
+            .filter(|(name, _)| !name.starts_with("__"))
+        {
+            let readable = config.readable_column_path(name, |leaf| {
+                key_types.get(leaf).copied().unwrap_or(ColumnType::String)
+            });
+
+            selectable.insert(readable, (format!("\"{}\"", name), Some(*ty)));
+        }
+
+        let select = |readable: &str, expr: &str| {
+            if expr == format!("\"{}\"", readable) {
+                expr.to_owned()
+            } else {
+                format!("{} AS \"{}\"", expr, readable)
+            }
+        };
+
+        let clauses: Vec<String> = match schema {
+            None => selectable
+                .iter()
+                .map(|(readable, (expr, _))| select(readable, expr))
+                .collect(),
+            Some(schema) => schema
+                .iter()
+                .map(|(name, ty)| match selectable.get(name) {
+                    Some((_, Some(actual))) if actual != ty => {
+                        Err(GenericSQLError::InvalidConfig(format!(
+                            "Column \"{}\" does not have the type of the View's column",
+                            name
+                        )))
+                    },
+                    Some((expr, _)) => Ok(select(name, expr)),
+                    None => Ok(format!("CAST(NULL AS {}) AS \"{}\"", sql_type(*ty), name)),
+                })
+                .collect::<GenericSQLResult<Vec<_>>>()?,
+        };
+
+        let template = self.0.create_entity.as_deref().unwrap_or("TABLE");
+        Ok(format!(
+            "CREATE {} {} AS (SELECT {} FROM {})",
+            template,
+            table_id,
+            clauses.join(", "),
+            view_id
+        ))
     }
 
     /// Returns the SQL query to fetch data from a view with the given viewport.
@@ -348,7 +516,11 @@ impl GenericSQLVirtualServerModel {
 
         let all_columns: Vec<String> = group_by_cols
             .into_iter()
-            .chain(data_columns.iter().map(|col| format!("\"{}\"", col)))
+            .chain(
+                data_columns
+                    .iter()
+                    .map(|col| format!("\"{}\"", quote_ident(col))),
+            )
             .collect();
 
         Ok(format!(
@@ -408,6 +580,7 @@ impl GenericSQLVirtualServerModel {
             ""
         };
 
+        let column_name = quote_ident(column_name);
         Ok(format!(
             "SELECT MIN(\"{}\"), MAX(\"{}\") FROM {}{}",
             column_name, column_name, view_id, where_clause

@@ -108,7 +108,7 @@ pub struct ViewPort {
     ///    optional bool leaves_only = 7;
     ///    optional bool compression = 3;
     #[prost(bool, optional, tag = "5")]
-    pub emit_legacy_row_path_names: ::core::option::Option<bool>,
+    pub machine_column_names: ::core::option::Option<bool>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -120,7 +120,7 @@ pub struct Request {
     pub entity_id: ::prost::alloc::string::String,
     #[prost(
         oneof = "request::ClientReq",
-        tags = "3, 4, 37, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 36, 27, 28, 29, 30, 31, 32, 33, 34, 35, 38, 39, 40"
+        tags = "3, 4, 37, 5, 6, 7, 8, 41, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 36, 27, 28, 29, 30, 31, 32, 33, 34, 35, 38, 39, 40"
     )]
     pub client_req: ::core::option::Option<request::ClientReq>,
 }
@@ -145,8 +145,8 @@ pub mod request {
         TableSchemaReq(super::TableSchemaReq),
         #[prost(message, tag = "8")]
         TableSizeReq(super::TableSizeReq),
-        #[prost(message, tag = "9")]
-        TableValidateExprReq(super::TableValidateExprReq),
+        #[prost(message, tag = "41")]
+        TableDescribeReq(super::TableDescribeReq),
         #[prost(message, tag = "10")]
         ViewColumnPathsReq(super::ViewColumnPathsReq),
         #[prost(message, tag = "11")]
@@ -222,7 +222,7 @@ pub struct Response {
     pub entity_id: ::prost::alloc::string::String,
     #[prost(
         oneof = "response::ClientResp",
-        tags = "3, 4, 37, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 36, 27, 28, 29, 30, 31, 32, 33, 34, 35, 38, 39, 40, 50"
+        tags = "3, 4, 37, 5, 6, 7, 8, 41, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 36, 27, 28, 29, 30, 31, 32, 33, 34, 35, 38, 39, 40, 50"
     )]
     pub client_resp: ::core::option::Option<response::ClientResp>,
 }
@@ -246,8 +246,8 @@ pub mod response {
         TableSchemaResp(super::TableSchemaResp),
         #[prost(message, tag = "8")]
         TableSizeResp(super::TableSizeResp),
-        #[prost(message, tag = "9")]
-        TableValidateExprResp(super::TableValidateExprResp),
+        #[prost(message, tag = "41")]
+        TableDescribeResp(super::TableDescribeResp),
         #[prost(message, tag = "10")]
         ViewColumnPathsResp(super::ViewColumnPathsResp),
         #[prost(message, tag = "11")]
@@ -353,6 +353,9 @@ pub struct GetFeaturesResp {
     pub unordered: bool,
     #[prost(enumeration = "SplitRollupMode", repeated, tag = "11")]
     pub split_rollup_mode: ::prost::alloc::vec::Vec<i32>,
+    /// Whether a `Table` can be derived from a `View` of this server.
+    #[prost(bool, tag = "12")]
+    pub view_derivations: bool,
 }
 /// Nested message and enum types in `GetFeaturesResp`.
 pub mod get_features_resp {
@@ -463,53 +466,72 @@ pub struct TableSchemaResp {
     #[prost(message, optional, tag = "1")]
     pub schema: ::core::option::Option<Schema>,
 }
-/// `Table::validate_expressions`
-/// TODO: This should be just `validate()`
+/// `Table::describe` - validate a complete `ViewConfig` against this table and
+/// report its result schema, without creating a `View`.
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct TableValidateExprReq {
-    #[prost(map = "string, string", tag = "1")]
-    pub column_to_expr: ::std::collections::HashMap<
-        ::prost::alloc::string::String,
-        ::prost::alloc::string::String,
-    >,
+pub struct TableDescribeReq {
+    #[prost(message, optional, tag = "1")]
+    pub config: ::core::option::Option<ViewConfig>,
 }
 #[derive(serde::Serialize)]
 #[derive(serde::Deserialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct TableValidateExprResp {
+pub struct TableDescribeResp {
+    /// Every VALID expression's type, whether or not the config as a whole is
+    /// valid.
     #[prost(map = "string, enumeration(ColumnType)", tag = "1")]
     pub expression_schema: ::std::collections::HashMap<
         ::prost::alloc::string::String,
         i32,
     >,
     #[prost(map = "string, message", tag = "2")]
-    pub errors: ::std::collections::HashMap<
+    pub expression_errors: ::std::collections::HashMap<
         ::prost::alloc::string::String,
-        table_validate_expr_resp::ExprValidationError,
+        ExpressionError,
     >,
-    #[prost(map = "string, string", tag = "3")]
-    pub expression_alias: ::std::collections::HashMap<
-        ::prost::alloc::string::String,
-        ::prost::alloc::string::String,
-    >,
+    #[prost(oneof = "table_describe_resp::Result", tags = "3, 4")]
+    pub result: ::core::option::Option<table_describe_resp::Result>,
 }
-/// Nested message and enum types in `TableValidateExprResp`.
-pub mod table_validate_expr_resp {
+/// Nested message and enum types in `TableDescribeResp`.
+pub mod table_describe_resp {
     #[derive(serde::Serialize)]
     #[derive(serde::Deserialize)]
     #[allow(clippy::derive_partial_eq_without_eq)]
-    #[derive(Clone, PartialEq, ::prost::Message)]
-    pub struct ExprValidationError {
-        #[prost(string, tag = "1")]
-        pub error_message: ::prost::alloc::string::String,
-        #[prost(uint32, tag = "2")]
-        pub line: u32,
-        #[prost(uint32, tag = "3")]
-        pub column: u32,
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Result {
+        /// Present IFF `expression_errors` is empty and the whole config is
+        /// valid.
+        #[prost(message, tag = "3")]
+        View(super::ViewDescription),
+        /// The first non-expression config error, when the expressions are all
+        /// valid but the config is not.
+        #[prost(string, tag = "4")]
+        ConfigError(::prost::alloc::string::String),
     }
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ViewDescription {
+    /// Equal to `View::schema()` of a `View` built from the same config.
+    #[prost(map = "string, enumeration(ColumnType)", tag = "1")]
+    pub schema: ::std::collections::HashMap<::prost::alloc::string::String, i32>,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExpressionError {
+    #[prost(string, tag = "1")]
+    pub error_message: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub line: u32,
+    #[prost(uint32, tag = "3")]
+    pub column: u32,
 }
 /// `Table::view`
 #[derive(serde::Serialize)]
@@ -594,6 +616,10 @@ pub mod make_table_req {
         pub page_to_disk: ::core::option::Option<bool>,
         #[prost(enumeration = "super::ListFlatten", optional, tag = "4")]
         pub list_flatten: ::core::option::Option<i32>,
+        /// The columns of a `Table` made from a `View`, in place of the ones
+        /// inferred from it. Only valid with `MakeTableData.from_view`.
+        #[prost(message, optional, tag = "5")]
+        pub view_schema: ::core::option::Option<super::Schema>,
         #[prost(oneof = "make_table_options::MakeTableType", tags = "1, 2")]
         pub make_table_type: ::core::option::Option<make_table_options::MakeTableType>,
     }
@@ -907,13 +933,21 @@ pub struct ViewColumnPathsReq {
     #[prost(uint32, optional, tag = "2")]
     pub end_col: ::core::option::Option<u32>,
 }
+/// One row of a column path area, `width` values long.
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ColumnPathLevel {
+    #[prost(message, repeated, tag = "1")]
+    pub values: ::prost::alloc::vec::Vec<Scalar>,
+}
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ViewColumnPathsResp {
-    /// repeated ColumnPath paths = 1;
-    #[prost(string, repeated, tag = "1")]
-    pub paths: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Transposed, `split_by.len() + 1` rows of `width` values each.
+    #[prost(message, repeated, tag = "2")]
+    pub area: ::prost::alloc::vec::Vec<ColumnPathLevel>,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
