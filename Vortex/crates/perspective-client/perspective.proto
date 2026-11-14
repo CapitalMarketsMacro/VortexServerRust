@@ -254,6 +254,13 @@ message GetFeaturesResp {
     // Whether a `Table` can be derived from a `View` of this server.
     bool view_derivations = 12;
 
+    // Whether `View::expand`, `View::collapse` and `View::set_depth` are
+    // supported for `group_by` views of this server.
+    bool expand_collapse = 13;
+
+    // Whether `Table::update` is supported for `Table`s of this server.
+    bool update = 14;
+
     message WindowAggregateOptions {
         repeated WindowAggregateArgs options = 1;
     }
@@ -291,7 +298,7 @@ message GetHostedTablesResp {
 
 message HostedTable {
     string entity_id = 1;
-    optional string index = 2;
+    repeated string index = 2;
     optional uint32 limit = 3;
 }
 
@@ -375,6 +382,11 @@ message ViewGetConfigResp {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// The columns of a composite `index`, in key order.
+message IndexColumns {
+    repeated string columns = 1;
+}
+
 // `Client::table`.
 message MakeTableReq {
     MakeTableData data = 1;
@@ -383,6 +395,7 @@ message MakeTableReq {
         oneof make_table_type {
             string make_index_table = 1;
             uint32 make_limit_table = 2;
+            IndexColumns make_composite_index_table = 6;
         };
 
         // Back this Table's canonical data with the on-disk storage backend
@@ -391,6 +404,11 @@ message MakeTableReq {
         optional bool page_to_disk = 3;
 
         optional ListFlatten list_flatten = 4;
+
+        optional StructFlatten struct_flatten = 7;
+
+        // Unset falls back to `struct_flatten`.
+        optional MapFlatten map_flatten = 8;
 
         // The columns of a `Table` made from a `View`, in place of the ones
         // inferred from it. Only valid with `MakeTableData.from_view`.
@@ -402,6 +420,19 @@ enum ListFlatten {
     LIST_FLATTEN_ZIP = 0;
     LIST_FLATTEN_CARTESIAN = 1;
     LIST_FLATTEN_STRINGIFY = 2;
+    LIST_FLATTEN_STRINGIFY_FORMATTED = 3;
+}
+
+enum StructFlatten {
+    STRUCT_FLATTEN_PIVOT = 0;
+    STRUCT_FLATTEN_STRINGIFY = 1;
+    STRUCT_FLATTEN_STRINGIFY_FORMATTED = 2;
+}
+
+enum MapFlatten {
+    MAP_FLATTEN_PIVOT = 0;
+    MAP_FLATTEN_STRINGIFY = 1;
+    MAP_FLATTEN_STRINGIFY_FORMATTED = 2;
 }
 message MakeTableResp {}
 
@@ -446,8 +477,14 @@ message TableRemoveDeleteResp {}
 // `View::on_remove`
 message ViewOnRemoveReq {}
 message ViewOnRemoveResp {
+    enum Cause {
+        KEY = 0;
+        GROUP = 1;
+        FILTER = 2;
+    }
     optional bytes indices = 1;
     uint32 port_id = 2;
+    Cause cause = 3;
 }
 
 // `View::remove_remove`
@@ -484,6 +521,7 @@ message ViewOnUpdateReq {
 message ViewOnUpdateResp {
     optional bytes delta = 1;
     uint32 port_id = 2;
+    bool reset = 3;
 }
 
 message ViewOnDeleteReq {}

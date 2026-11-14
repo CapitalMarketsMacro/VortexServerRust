@@ -356,6 +356,13 @@ pub struct GetFeaturesResp {
     /// Whether a `Table` can be derived from a `View` of this server.
     #[prost(bool, tag = "12")]
     pub view_derivations: bool,
+    /// Whether `View::expand`, `View::collapse` and `View::set_depth` are
+    /// supported for `group_by` views of this server.
+    #[prost(bool, tag = "13")]
+    pub expand_collapse: bool,
+    /// Whether `Table::update` is supported for `Table`s of this server.
+    #[prost(bool, tag = "14")]
+    pub update: bool,
 }
 /// Nested message and enum types in `GetFeaturesResp`.
 pub mod get_features_resp {
@@ -426,8 +433,8 @@ pub struct GetHostedTablesResp {
 pub struct HostedTable {
     #[prost(string, tag = "1")]
     pub entity_id: ::prost::alloc::string::String,
-    #[prost(string, optional, tag = "2")]
-    pub index: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, repeated, tag = "2")]
+    pub index: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(uint32, optional, tag = "3")]
     pub limit: ::core::option::Option<u32>,
 }
@@ -593,6 +600,14 @@ pub struct ViewGetConfigResp {
     #[prost(message, optional, tag = "1")]
     pub config: ::core::option::Option<ViewConfig>,
 }
+/// The columns of a composite `index`, in key order.
+#[derive(serde::Serialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct IndexColumns {
+    #[prost(string, repeated, tag = "1")]
+    pub columns: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 /// `Client::table`.
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -616,11 +631,16 @@ pub mod make_table_req {
         pub page_to_disk: ::core::option::Option<bool>,
         #[prost(enumeration = "super::ListFlatten", optional, tag = "4")]
         pub list_flatten: ::core::option::Option<i32>,
+        #[prost(enumeration = "super::StructFlatten", optional, tag = "7")]
+        pub struct_flatten: ::core::option::Option<i32>,
+        /// Unset falls back to `struct_flatten`.
+        #[prost(enumeration = "super::MapFlatten", optional, tag = "8")]
+        pub map_flatten: ::core::option::Option<i32>,
         /// The columns of a `Table` made from a `View`, in place of the ones
         /// inferred from it. Only valid with `MakeTableData.from_view`.
         #[prost(message, optional, tag = "5")]
         pub view_schema: ::core::option::Option<super::Schema>,
-        #[prost(oneof = "make_table_options::MakeTableType", tags = "1, 2")]
+        #[prost(oneof = "make_table_options::MakeTableType", tags = "1, 2, 6")]
         pub make_table_type: ::core::option::Option<make_table_options::MakeTableType>,
     }
     /// Nested message and enum types in `MakeTableOptions`.
@@ -633,6 +653,8 @@ pub mod make_table_req {
             MakeIndexTable(::prost::alloc::string::String),
             #[prost(uint32, tag = "2")]
             MakeLimitTable(u32),
+            #[prost(message, tag = "6")]
+            MakeCompositeIndexTable(super::super::IndexColumns),
         }
     }
 }
@@ -710,17 +732,60 @@ pub struct TableRemoveDeleteResp {}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ViewOnRemoveReq {}
-#[derive(ts_rs::TS)]
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ViewOnRemoveResp {
     #[prost(bytes = "vec", optional, tag = "1")]
-    #[ts(type = "Uint8Array")]
     #[serde(with = "serde_bytes")]
     pub indices: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(uint32, tag = "2")]
     pub port_id: u32,
+    #[prost(enumeration = "view_on_remove_resp::Cause", tag = "3")]
+    pub cause: i32,
+}
+/// Nested message and enum types in `ViewOnRemoveResp`.
+pub mod view_on_remove_resp {
+    #[derive(serde::Serialize)]
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum Cause {
+        Key = 0,
+        Group = 1,
+        Filter = 2,
+    }
+    impl Cause {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Cause::Key => "KEY",
+                Cause::Group => "GROUP",
+                Cause::Filter => "FILTER",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "KEY" => Some(Self::Key),
+                "GROUP" => Some(Self::Group),
+                "FILTER" => Some(Self::Filter),
+                _ => None,
+            }
+        }
+    }
 }
 /// `View::remove_remove`
 #[derive(serde::Serialize)]
@@ -827,6 +892,8 @@ pub struct ViewOnUpdateResp {
     pub delta: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
     #[prost(uint32, tag = "2")]
     pub port_id: u32,
+    #[prost(bool, tag = "3")]
+    pub reset: bool,
 }
 #[derive(serde::Serialize)]
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -1434,6 +1501,7 @@ pub enum ListFlatten {
     Zip = 0,
     Cartesian = 1,
     Stringify = 2,
+    StringifyFormatted = 3,
 }
 impl ListFlatten {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1445,6 +1513,7 @@ impl ListFlatten {
             ListFlatten::Zip => "LIST_FLATTEN_ZIP",
             ListFlatten::Cartesian => "LIST_FLATTEN_CARTESIAN",
             ListFlatten::Stringify => "LIST_FLATTEN_STRINGIFY",
+            ListFlatten::StringifyFormatted => "LIST_FLATTEN_STRINGIFY_FORMATTED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1453,6 +1522,71 @@ impl ListFlatten {
             "LIST_FLATTEN_ZIP" => Some(Self::Zip),
             "LIST_FLATTEN_CARTESIAN" => Some(Self::Cartesian),
             "LIST_FLATTEN_STRINGIFY" => Some(Self::Stringify),
+            "LIST_FLATTEN_STRINGIFY_FORMATTED" => Some(Self::StringifyFormatted),
+            _ => None,
+        }
+    }
+}
+#[derive(serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum StructFlatten {
+    Pivot = 0,
+    Stringify = 1,
+    StringifyFormatted = 2,
+}
+impl StructFlatten {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            StructFlatten::Pivot => "STRUCT_FLATTEN_PIVOT",
+            StructFlatten::Stringify => "STRUCT_FLATTEN_STRINGIFY",
+            StructFlatten::StringifyFormatted => "STRUCT_FLATTEN_STRINGIFY_FORMATTED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "STRUCT_FLATTEN_PIVOT" => Some(Self::Pivot),
+            "STRUCT_FLATTEN_STRINGIFY" => Some(Self::Stringify),
+            "STRUCT_FLATTEN_STRINGIFY_FORMATTED" => Some(Self::StringifyFormatted),
+            _ => None,
+        }
+    }
+}
+#[derive(serde::Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[derive(serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MapFlatten {
+    Pivot = 0,
+    Stringify = 1,
+    StringifyFormatted = 2,
+}
+impl MapFlatten {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            MapFlatten::Pivot => "MAP_FLATTEN_PIVOT",
+            MapFlatten::Stringify => "MAP_FLATTEN_STRINGIFY",
+            MapFlatten::StringifyFormatted => "MAP_FLATTEN_STRINGIFY_FORMATTED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MAP_FLATTEN_PIVOT" => Some(Self::Pivot),
+            "MAP_FLATTEN_STRINGIFY" => Some(Self::Stringify),
+            "MAP_FLATTEN_STRINGIFY_FORMATTED" => Some(Self::StringifyFormatted),
             _ => None,
         }
     }
