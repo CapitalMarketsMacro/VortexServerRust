@@ -17,9 +17,6 @@
 
 // TODO(texodus): Missing these features
 //
-// - row expand/collapse in the datagrid needs datamodel support, this is likely
-//   a "collapsed" boolean column in the temp table we `UPDATE`.
-//
 // - `on_update` real-time support will be method which takes sa view name and a
 //   handler and calls the handler when the view needs to be recalculated.
 //
@@ -45,7 +42,9 @@ use crate::config::{
     FilterTerm, GroupRollupMode, Scalar, Sort, SortDir, SplitRollupMode, ViewConfig,
 };
 use crate::proto::{ColumnType, ViewPort};
-use crate::virtual_server::generic_sql_model::table_make_view::{ViewQueryContext, quote_ident};
+use crate::virtual_server::generic_sql_model::table_make_view::{
+    ViewQueryContext, entity_ref, is_bare_ident, quote_ident,
+};
 
 /// Error type for SQL generation operations.
 #[derive(Debug, Clone)]
@@ -99,8 +98,16 @@ pub struct GenericSQLVirtualServerModelArgs {
     /// Expression for the dialect's natural row identity, used for unsorted
     /// view order and natural-order window frames — `rowid` (DuckDB, the
     /// default) or `ctid` (Postgres). Dialects with no such pseudo-column
-    /// (ClickHouse) should advertise `unordered` instead.
+    /// (ClickHouse) set [`Self::unordered`] instead.
     row_id_expr: Option<String>,
+
+    /// Whether the dialect has NO natural row identity (ClickHouse), so the
+    /// builder must never reference `row_id_expr`: an unsorted view takes no
+    /// default `ORDER BY` (its order is whatever the engine scans), and a
+    /// split-only pivot numbers its rows with `ROW_NUMBER() OVER ()`. Pair
+    /// with the handler's `unordered` feature, which rejects windows without
+    /// an explicit `order_by` before they reach the builder.
+    unordered: Option<bool>,
 
     /// Separator joining `split_by` values and the column name in pivoted
     /// view column names, e.g. `"CA|Sales"` for separator `"|"`. Perspective's
@@ -132,6 +139,19 @@ pub struct GenericSQLVirtualServerModelArgs {
     /// Template wrapping a `SELECT` so the dialect PLANS it and reports its
     /// result columns without executing it; `{}` is the query.
     describe_template: Option<String>,
+
+    /// Whether the dialect folds unquoted identifiers to lower case
+    /// (Postgres), so [`GenericSQLVirtualServerModel::table_path`] must
+    /// quote any path part with an upper-case letter to keep it resolving
+    /// to the same relation. Case-insensitive (DuckDB) and case-preserving
+    /// (ClickHouse) dialects omit it.
+    folds_unquoted_to_lower: Option<bool>,
+
+    /// Whether views carry a `__HIDDEN__` column, `UPDATE`d in place by
+    /// [`GenericSQLVirtualServerModel::view_expand`] and friends, which
+    /// requires `create_entity` be a table whose scan order is its insertion
+    /// order (DuckDB's default).
+    expand_collapse: Option<bool>,
 }
 
 /// Recovers the source column of a pivoted view column name — the longest
@@ -198,6 +218,162 @@ impl GenericSQLVirtualServerModel {
         Self(args)
     }
 
+    fn is_expand_collapse(&self) -> bool {
+        self.0.expand_collapse.unwrap_or(false)
+    }
+
+    /// The `WHERE` clause excluding collapsed rows from a view's reads.
+    fn visible_rows_sql(&self) -> &'static str {
+        if self.is_expand_collapse() {
+            " WHERE NOT \"__HIDDEN__\""
+        } else {
+            ""
+        }
+    }
+
+    /// A row's `group_by` path length, derived from its `__GROUPING_ID__`.
+    fn row_depth_sql(&self, config: &ViewConfig, alias: &str) -> String {
+        let levels = config.group_by.len();
+        let whens = (0..=levels)
+            .map(|k| format!("WHEN {} THEN {}", (1u64 << k) - 1, levels - k))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        format!("(CASE {}\"__GROUPING_ID__\" {} END)", alias, whens)
+    }
+
+    fn check_expandable(&self, config: &ViewConfig) -> GenericSQLResult<()> {
+        if !self.is_expand_collapse()
+            || config.group_by.is_empty()
+            || config.group_rollup_mode != GroupRollupMode::Rollup
+        {
+            return Err(GenericSQLError::UnsupportedOperation(
+                "expand/collapse requires `expand_collapse` and a \"rollup\" `group_by` view"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// A one-row relation `r` of the `row_index`-th visible row's `lo` row id,
+    /// `depth`, and the row id `hi` just past its subtree.
+    fn expansion_target_sql(
+        &self,
+        view_id: &str,
+        config: &ViewConfig,
+        row_index: u32,
+    ) -> GenericSQLResult<String> {
+        self.check_expandable(config)?;
+        let row_id = self.0.row_id_expr.as_deref().unwrap_or("rowid");
+        let view_id = entity_ref(view_id);
+        Ok(format!(
+            "(SELECT t.idx AS lo, t.depth AS depth, COALESCE(MIN(n.{row_id}), (SELECT \
+             MAX({row_id}) + 1 FROM {view_id})) AS hi FROM (SELECT {row_id} AS idx, {depth} AS \
+             depth FROM {view_id} WHERE NOT \"__HIDDEN__\" ORDER BY {row_id} LIMIT 1 OFFSET \
+             {row_index}) AS t LEFT JOIN {view_id} AS n ON n.{row_id} > t.idx AND {n_depth} <= \
+             t.depth GROUP BY t.idx, t.depth) AS r",
+            depth = self.row_depth_sql(config, ""),
+            n_depth = self.row_depth_sql(config, "n."),
+        ))
+    }
+
+    /// Returns the `UPDATE` showing the children of the `row_index`-th visible
+    /// row, each collapsed, whose affected-row count is the rows shown.
+    ///
+    /// # Returns
+    /// SQL: `UPDATE {view_id} SET "__HIDDEN__" = FALSE FROM (...) AS r WHERE
+    /// ...`
+    pub fn view_expand(
+        &self,
+        view_id: &str,
+        config: &ViewConfig,
+        row_index: u32,
+    ) -> GenericSQLResult<String> {
+        let row_id = self.0.row_id_expr.as_deref().unwrap_or("rowid");
+        Ok(format!(
+            "UPDATE {view_ref} AS v SET \"__HIDDEN__\" = FALSE FROM {target} WHERE v.{row_id} > \
+             r.lo AND v.{row_id} < r.hi AND {depth} = r.depth + 1 AND v.\"__HIDDEN__\"",
+            view_ref = entity_ref(view_id),
+            target = self.expansion_target_sql(view_id, config, row_index)?,
+            depth = self.row_depth_sql(config, "v."),
+        ))
+    }
+
+    /// Returns the `UPDATE` hiding every descendant of the `row_index`-th
+    /// visible row, whose affected-row count is the rows hidden.
+    ///
+    /// # Returns
+    /// SQL: `UPDATE {view_id} SET "__HIDDEN__" = TRUE FROM (...) AS r WHERE
+    /// ...`
+    pub fn view_collapse(
+        &self,
+        view_id: &str,
+        config: &ViewConfig,
+        row_index: u32,
+    ) -> GenericSQLResult<String> {
+        let row_id = self.0.row_id_expr.as_deref().unwrap_or("rowid");
+        Ok(format!(
+            "UPDATE {view_ref} AS v SET \"__HIDDEN__\" = TRUE FROM {target} WHERE v.{row_id} > \
+             r.lo AND v.{row_id} < r.hi AND NOT v.\"__HIDDEN__\"",
+            view_ref = entity_ref(view_id),
+            target = self.expansion_target_sql(view_id, config, row_index)?,
+        ))
+    }
+
+    /// Returns the `UPDATE` expanding exactly the rows whose path is no longer
+    /// than `depth`.
+    ///
+    /// # Returns
+    /// SQL: `UPDATE {view_id} SET "__HIDDEN__" = ({depth expr} > {depth + 1})`
+    pub fn view_set_depth(
+        &self,
+        view_id: &str,
+        config: &ViewConfig,
+        depth: u32,
+    ) -> GenericSQLResult<String> {
+        self.check_expandable(config)?;
+        Ok(format!(
+            "UPDATE {} SET \"__HIDDEN__\" = ({} > {})",
+            entity_ref(view_id),
+            self.row_depth_sql(config, ""),
+            depth as u64 + 1
+        ))
+    }
+
+    /// Renders a hosted table's relation path - e.g. `["memory", "main",
+    /// "trades"]` - as its entity id: parts joined with `.`, each quoted
+    /// only when it is not a bare identifier, so that SQL-safe names read as
+    /// they always have (`memory.trades`) and every other name is still a
+    /// relation reference the builder passes through verbatim.
+    pub fn table_path(&self, parts: &[&str]) -> GenericSQLResult<String> {
+        if parts.is_empty() || parts.iter().any(|x| x.is_empty()) {
+            return Err(GenericSQLError::InvalidConfig(format!(
+                "Invalid table path {parts:?}"
+            )));
+        }
+
+        let folds = self.0.folds_unquoted_to_lower.unwrap_or(false);
+        Ok(parts
+            .iter()
+            .map(|part| {
+                if is_bare_ident(part) && !(folds && part.chars().any(char::is_uppercase)) {
+                    (*part).to_owned()
+                } else {
+                    format!("\"{}\"", quote_ident(part))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("."))
+    }
+
+    /// Returns the SQL relation reference for an entity id - a hosted
+    /// table's path verbatim, any other name quoted whole - for handlers
+    /// that build their own queries against an entity.
+    pub fn quote_entity(&self, entity_id: &str) -> GenericSQLResult<String> {
+        Ok(entity_ref(entity_id))
+    }
+
     /// Returns the SQL query to list all hosted tables.
     ///
     /// # Returns
@@ -214,7 +390,7 @@ impl GenericSQLVirtualServerModel {
     /// # Returns
     /// SQL: `DESCRIBE {table_id}`
     pub fn table_schema(&self, table_id: &str) -> GenericSQLResult<String> {
-        Ok(format!("DESCRIBE {}", table_id))
+        Ok(format!("DESCRIBE {}", entity_ref(table_id)))
     }
 
     /// Returns the SQL query to get the row count of a table.
@@ -225,7 +401,7 @@ impl GenericSQLVirtualServerModel {
     /// # Returns
     /// SQL: `SELECT COUNT(*) FROM {table_id}`
     pub fn table_size(&self, table_id: &str) -> GenericSQLResult<String> {
-        Ok(format!("SELECT COUNT(*) FROM {}", table_id))
+        Ok(format!("SELECT COUNT(*) FROM {}", entity_ref(table_id)))
     }
 
     /// Returns the SQL query to get the column count of a view.
@@ -236,7 +412,10 @@ impl GenericSQLVirtualServerModel {
     /// # Returns
     /// SQL: `SELECT COUNT(*) FROM (DESCRIBE {view_id})`
     pub fn view_column_size(&self, view_id: &str) -> GenericSQLResult<String> {
-        Ok(format!("SELECT COUNT(*) FROM (DESCRIBE {})", view_id))
+        Ok(format!(
+            "SELECT COUNT(*) FROM (DESCRIBE {})",
+            entity_ref(view_id)
+        ))
     }
 
     fn describe_wrap(&self, query: &str) -> String {
@@ -277,7 +456,8 @@ impl GenericSQLVirtualServerModel {
 
         Ok(Some(self.describe_wrap(&format!(
             "SELECT {} FROM {}",
-            selects, table_id
+            selects,
+            entity_ref(table_id)
         ))))
     }
 
@@ -290,7 +470,11 @@ impl GenericSQLVirtualServerModel {
         table_id: &str,
         expression: &str,
     ) -> GenericSQLResult<String> {
-        Ok(self.describe_wrap(&format!("SELECT {} FROM {}", expression, table_id)))
+        Ok(self.describe_wrap(&format!(
+            "SELECT {} FROM {}",
+            expression,
+            entity_ref(table_id)
+        )))
     }
 
     /// Returns the SQL query that plans the view `config` would build against
@@ -303,6 +487,28 @@ impl GenericSQLVirtualServerModel {
         table_id: &str,
         config: &ViewConfig,
         schema: &IndexMap<String, ColumnType>,
+    ) -> GenericSQLResult<Option<String>> {
+        self.table_describe_source(table_id, config, schema, false)
+    }
+
+    /// As [`Self::table_describe`], for a source with no natural row order -
+    /// a table made by [`Self::view_make_table`] in a dialect whose
+    /// `create_entity` is a view, which `row_id_expr` cannot address.
+    pub fn table_describe_unordered(
+        &self,
+        table_id: &str,
+        config: &ViewConfig,
+        schema: &IndexMap<String, ColumnType>,
+    ) -> GenericSQLResult<Option<String>> {
+        self.table_describe_source(table_id, config, schema, true)
+    }
+
+    fn table_describe_source(
+        &self,
+        table_id: &str,
+        config: &ViewConfig,
+        schema: &IndexMap<String, ColumnType>,
+        unordered: bool,
     ) -> GenericSQLResult<Option<String>> {
         if config.columns.iter().flatten().next().is_none() {
             return Ok(None);
@@ -319,8 +525,8 @@ impl GenericSQLVirtualServerModel {
             folded.group_by.extend(split_by);
         }
 
-        let ctx = ViewQueryContext::new(self, table_id, &folded, schema)?;
-        Ok(Some(self.describe_wrap(&ctx.build_query())))
+        let ctx = ViewQueryContext::new(self, table_id, &folded, schema, unordered)?;
+        Ok(Some(self.describe_wrap(&ctx.build_query_unordered())))
     }
 
     /// Returns the SQL query to delete a view.
@@ -332,7 +538,7 @@ impl GenericSQLVirtualServerModel {
     /// SQL: `DROP {drop_entity} IF EXISTS {view_id}`
     pub fn view_delete(&self, view_id: &str) -> GenericSQLResult<String> {
         let entity = self.0.drop_entity.as_deref().unwrap_or("TABLE");
-        Ok(format!("DROP {} IF EXISTS {}", entity, view_id))
+        Ok(format!("DROP {} IF EXISTS {}", entity, entity_ref(view_id)))
     }
 
     /// Returns the SQL query to create a view from a table with the given
@@ -354,10 +560,48 @@ impl GenericSQLVirtualServerModel {
         config: &ViewConfig,
         schema: &IndexMap<String, ColumnType>,
     ) -> GenericSQLResult<String> {
-        let ctx = ViewQueryContext::new(self, table_id, config, schema)?;
-        let query = ctx.build_query();
+        self.table_make_view_source(table_id, view_id, config, schema, false)
+    }
+
+    /// As [`Self::table_make_view`], for a source with no natural row order -
+    /// a table made by [`Self::view_make_table`] in a dialect whose
+    /// `create_entity` is a view, which `row_id_expr` cannot address - so an
+    /// unsorted view takes the source's own order and windows never read
+    /// `row_id_expr`.
+    pub fn table_make_view_unordered(
+        &self,
+        table_id: &str,
+        view_id: &str,
+        config: &ViewConfig,
+        schema: &IndexMap<String, ColumnType>,
+    ) -> GenericSQLResult<String> {
+        self.table_make_view_source(table_id, view_id, config, schema, true)
+    }
+
+    fn table_make_view_source(
+        &self,
+        table_id: &str,
+        view_id: &str,
+        config: &ViewConfig,
+        schema: &IndexMap<String, ColumnType>,
+        unordered: bool,
+    ) -> GenericSQLResult<String> {
+        let ctx = ViewQueryContext::new(self, table_id, config, schema, unordered)?;
+        let mut query = ctx.build_query();
+        if self.is_expand_collapse() {
+            query = format!(
+                "SELECT *, FALSE AS \"__HIDDEN__\" FROM ({}) AS __PSP_EXPAND_SRC__",
+                query
+            );
+        }
+
         let template = self.0.create_entity.as_deref().unwrap_or("TABLE");
-        Ok(format!("CREATE {} {} AS ({})", template, view_id, query))
+        Ok(format!(
+            "CREATE {} {} AS ({})",
+            template,
+            entity_ref(view_id),
+            query
+        ))
     }
 
     /// Returns the SQL query to create a table from a view, with the view's
@@ -442,9 +686,9 @@ impl GenericSQLVirtualServerModel {
         Ok(format!(
             "CREATE {} {} AS (SELECT {} FROM {})",
             template,
-            table_id,
+            entity_ref(table_id),
             clauses.join(", "),
-            view_id
+            entity_ref(view_id)
         ))
     }
 
@@ -524,9 +768,10 @@ impl GenericSQLVirtualServerModel {
             .collect();
 
         Ok(format!(
-            "SELECT {} FROM {} {}",
+            "SELECT {} FROM {}{} {}",
             all_columns.join(", "),
-            view_id,
+            entity_ref(view_id),
+            self.visible_rows_sql(),
             limit_clause
         )
         .trim()
@@ -541,10 +786,10 @@ impl GenericSQLVirtualServerModel {
     /// # Returns
     /// SQL: `DESCRIBE {view_id}`
     pub fn view_schema(&self, view_id: &str) -> GenericSQLResult<String> {
-        Ok(format!("DESCRIBE {}", view_id))
+        Ok(format!("DESCRIBE {}", entity_ref(view_id)))
     }
 
-    /// Returns the SQL query to get the row count of a view.
+    /// Returns the SQL query to get the (visible) row count of a view.
     ///
     /// # Arguments
     /// * `view_id` - The identifier of the view.
@@ -552,7 +797,11 @@ impl GenericSQLVirtualServerModel {
     /// # Returns
     /// SQL: `SELECT COUNT(*) FROM {view_id}`
     pub fn view_size(&self, view_id: &str) -> GenericSQLResult<String> {
-        Ok(format!("SELECT COUNT(*) FROM {}", view_id))
+        Ok(format!(
+            "SELECT COUNT(*) FROM {}{}",
+            entity_ref(view_id),
+            self.visible_rows_sql()
+        ))
     }
 
     /// Returns the SQL query to get the min and max values of a column.
@@ -583,7 +832,10 @@ impl GenericSQLVirtualServerModel {
         let column_name = quote_ident(column_name);
         Ok(format!(
             "SELECT MIN(\"{}\"), MAX(\"{}\") FROM {}{}",
-            column_name, column_name, view_id, where_clause
+            column_name,
+            column_name,
+            entity_ref(view_id),
+            where_clause
         ))
     }
 

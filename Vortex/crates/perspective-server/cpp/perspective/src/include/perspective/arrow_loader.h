@@ -44,12 +44,10 @@ namespace apachearrow {
          * describe the post-flattening shape.
          *
          * @param ptr
-         * @param mode - how `LIST` columns are ingested.
+         * @param mode - how nested columns are ingested.
          */
         void initialize(
-            const std::uint8_t* ptr,
-            std::uint32_t,
-            t_list_flatten mode = LIST_FLATTEN_ZIP
+            const std::uint8_t* ptr, std::uint32_t, t_flatten_mode mode = {}
         );
 
         /**
@@ -61,10 +59,10 @@ namespace apachearrow {
          * the identical value on every row of the group and would silently
          * collide.
          *
-         * @param index - the explicit index column, or empty for none.
+         * @param index - the explicit index columns, or empty for none.
          */
-        std::optional<std::string> repeated_index(const std::string& index
-        ) const;
+        std::optional<std::string>
+        repeated_index(const std::vector<std::string>& index) const;
 
         /**
          * @brief Initialize the arrow loader with a CSV.
@@ -92,7 +90,7 @@ namespace apachearrow {
         void fill_table(
             t_data_table& tbl,
             const t_schema& input_schema,
-            const std::string& index,
+            const std::vector<std::string>& index,
             std::uint32_t offset,
             bool is_update
         );
@@ -131,6 +129,7 @@ namespace apachearrow {
         std::vector<std::string> m_names;
         std::vector<t_dtype> m_types;
         bool m_expanded{false};
+        t_flatten_mode m_mode;
     };
 
     template <typename T, typename V, typename GATHER>

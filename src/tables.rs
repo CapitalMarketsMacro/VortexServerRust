@@ -51,7 +51,7 @@ impl TableSlot {
 
         let mut opts = TableInitOptions::default();
         opts.set_name(&self.name);
-        opts.index = self.config.perspective_index();
+        opts.index = self.config.perspective_index().map(Into::into);
         // Stored on the engine table, so it also governs every later update.
         opts.list_flatten = Some(self.config.list_flatten.to_proto());
 
@@ -123,7 +123,7 @@ impl TableRegistry {
 
             let mut opts = TableInitOptions::default();
             opts.set_name(&slot.name);
-            opts.index = slot.config.perspective_index();
+            opts.index = slot.config.perspective_index().map(Into::into);
             opts.list_flatten = Some(slot.config.list_flatten.to_proto());
 
             let table = slot

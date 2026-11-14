@@ -86,7 +86,7 @@ async fn run() -> TestResult {
     let local = server.new_local_client();
     let mut opts = TableInitOptions::default();
     opts.set_name(TABLE);
-    opts.index = Some("id".to_string());
+    opts.index = Some("id".into());
     let table = local
         .table(
             UpdateData::JsonRows(r#"[{"id":"a","px":1.5},{"id":"b","px":2.5}]"#.to_string()).into(),

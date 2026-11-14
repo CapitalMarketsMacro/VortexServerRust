@@ -157,6 +157,40 @@ pub trait VirtualServerHandler {
         Box::pin(async { unimplemented!("view_get_min_max not implemented") })
     }
 
+    /// Expands the row at `row_index` of a `"rollup"` mode `group_by` view to
+    /// show its children, each collapsed, returning the number of rows shown.
+    fn view_expand(
+        &mut self,
+        _view_id: &str,
+        _config: &ViewConfig,
+        _row_index: u32,
+    ) -> VirtualServerFuture<'_, Result<u32, Self::Error>> {
+        Box::pin(async { unimplemented!("view_expand not implemented") })
+    }
+
+    /// Collapses the row at `row_index` of a `"rollup"` mode `group_by` view,
+    /// discarding its descendants' expansion, returning the number of rows
+    /// hidden.
+    fn view_collapse(
+        &mut self,
+        _view_id: &str,
+        _config: &ViewConfig,
+        _row_index: u32,
+    ) -> VirtualServerFuture<'_, Result<u32, Self::Error>> {
+        Box::pin(async { unimplemented!("view_collapse not implemented") })
+    }
+
+    /// Expands every row of a `"rollup"` mode `group_by` view whose path is no
+    /// longer than `depth` and collapses the rest.
+    fn view_set_depth(
+        &mut self,
+        _view_id: &str,
+        _config: &ViewConfig,
+        _depth: u32,
+    ) -> VirtualServerFuture<'_, Result<(), Self::Error>> {
+        Box::pin(async { unimplemented!("view_set_depth not implemented") })
+    }
+
     // Unused
 
     /// Creates a table from a view, with `schema` in place of the view's
@@ -171,6 +205,14 @@ pub trait VirtualServerHandler {
         _schema: Option<&IndexMap<String, ColumnType>>,
     ) -> VirtualServerFuture<'_, Result<(), Self::Error>> {
         Box::pin(async { unimplemented!("view_make_table not implemented") })
+    }
+
+    /// Deletes a table made by [`Self::view_make_table`].
+    ///
+    /// Default implementation delegates to [`Self::view_delete`], for
+    /// backends which create both as the same kind of entity.
+    fn table_delete(&self, table_id: &str) -> VirtualServerFuture<'_, Result<(), Self::Error>> {
+        self.view_delete(table_id)
     }
 
     /// Creates a new table with the given data.

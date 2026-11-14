@@ -22,6 +22,7 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::config::GroupRollupMode;
 use crate::proto::request::ClientReq;
 use crate::proto::response::ClientResp;
 use crate::proto::{
@@ -29,7 +30,7 @@ use crate::proto::{
     HostedTable, JoinType, MakeJoinTableReq, MakeTableReq, RemoveHostedTablesUpdateReq, Request,
     Response, ServerError, ServerSystemInfoReq,
 };
-use crate::table::{JoinOptions, Table, TableInitOptions, TableOptions, ViewBinding};
+use crate::table::{JoinOptions, Table, TableIndex, TableInitOptions, TableOptions, ViewBinding};
 use crate::table_data::{TableData, UpdateData};
 use crate::table_ref::TableRef;
 use crate::utils::*;
@@ -576,6 +577,11 @@ impl Client {
     /// # Ok(()) }
     /// ```
     pub async fn table(&self, input: TableData, options: TableInitOptions) -> ClientResult<Table> {
+        let mut options = options;
+        if let Some(index) = options.index.take() {
+            options.index = Some(index.normalize()?);
+        }
+
         let entity_id = match options.name.clone() {
             Some(x) => x.to_owned(),
             None => randid(),
@@ -585,10 +591,19 @@ impl Client {
             let request_options: TableOptions = options.clone().into();
             let mut options = options;
             let source_index = view.source.as_ref().and_then(|x| x.options.index.clone());
+            let config = view.get_config().await?;
+            let is_pivoted = !config.group_by.is_empty();
+            let keyed_by_group = options.index.is_none()
+                && is_pivoted
+                && config.split_by.is_empty()
+                && config.group_rollup_mode == GroupRollupMode::Flat;
             if let (None, Some(index)) = (&options.index, &source_index) {
-                let config = view.get_config().await?;
                 let is_flat = config.group_by.is_empty() && config.split_by.is_empty();
-                let has_index = config.columns.iter().flatten().any(|x| x == index);
+                let has_index = index
+                    .columns()
+                    .iter()
+                    .all(|column| config.columns.iter().flatten().any(|x| x == column));
+
                 if is_flat && has_index {
                     options.index = Some(index.clone());
                 }
@@ -603,11 +618,26 @@ impl Client {
                 self.crate_table_inner(data, request_options, entity_id.clone())
                     .await?;
 
+                let has_keys = options
+                    .schema
+                    .as_ref()
+                    .is_none_or(|schema| config.group_by.iter().all(|x| schema.contains_key(x)));
+
+                if keyed_by_group && has_keys {
+                    options.index = TableIndex::from_columns(config.group_by.clone());
+                    options.limit = None;
+                }
+
                 return Ok(Table::new(entity_id, self.clone(), options.into()));
             }
 
             if options.schema.is_some() {
                 return Err(ClientError::BadTableOptions);
+            }
+
+            if keyed_by_group {
+                options.index = TableIndex::from_columns(config.group_by.clone());
+                options.limit = None;
             }
 
             let window = ViewWindow::default();
@@ -618,9 +648,13 @@ impl Client {
 
             let table_ = table.clone();
             let callback = asyncfn!(table_, update, async move |update: OnUpdateData| {
-                let update = UpdateData::Arrow(update.delta.expect("Malformed message").into());
-                let options = crate::UpdateOptions::default();
-                table_.update(update, options).await.unwrap_or_log();
+                let data = UpdateData::Arrow(update.delta.expect("Malformed message").into());
+                if update.reset {
+                    table_.replace(data).await.unwrap_or_log();
+                } else {
+                    let options = crate::UpdateOptions::default();
+                    table_.update(data, options).await.unwrap_or_log();
+                }
             });
 
             let options = OnUpdateOptions {
@@ -628,7 +662,11 @@ impl Client {
             };
 
             let update_token = view.on_update(callback, options).await?;
-            let remove_token = if source_index.is_some() && source_index == table.get_index() {
+            let replica_index = table.get_index();
+            let mirrors_removes =
+                replica_index.is_some() && (is_pivoted || source_index == replica_index);
+
+            let remove_token = if mirrors_removes {
                 let table_ = table.clone();
                 let callback = asyncfn!(table_, async move |removed: OnRemoveData| {
                     if let Some(indices) = removed.indices.as_ref().filter(|x| !x.is_empty()) {
@@ -713,10 +751,12 @@ impl Client {
         let client = self.clone();
         match self.oneshot(&msg).await? {
             ClientResp::MakeJoinTableResp(_) => Ok(Table::new(entity_id, client, TableOptions {
-                index: Some(on.to_owned()),
+                index: Some(TableIndex::Column(on.to_owned())),
                 limit: None,
                 page_to_disk: None,
                 list_flatten: None,
+                struct_flatten: None,
+                map_flatten: None,
                 schema: None,
             })),
             resp => Err(resp.into()),
@@ -760,10 +800,12 @@ impl Client {
         // TODO fix this - name is repeated 2x
         if let Some(info) = infos.into_iter().find(|i| i.entity_id == entity_id) {
             let options = TableOptions {
-                index: info.index,
+                index: TableIndex::from_columns(info.index),
                 limit: info.limit,
                 page_to_disk: None,
                 list_flatten: None,
+                struct_flatten: None,
+                map_flatten: None,
                 schema: None,
             };
 

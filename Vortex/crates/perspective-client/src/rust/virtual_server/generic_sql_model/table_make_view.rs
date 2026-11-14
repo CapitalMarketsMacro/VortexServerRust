@@ -65,7 +65,7 @@ fn window_over_clause(
     w: &WindowSpec,
     frame: Option<&str>,
     order_expr: Option<&str>,
-    row_id: &str,
+    row_id: Option<&str>,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !w.partition_by.is_empty() {
@@ -100,7 +100,11 @@ fn window_over_clause(
                 }
             ))
         },
-        None => parts.push(format!("ORDER BY {} ASC", row_id)),
+        None => {
+            if let Some(row_id) = row_id {
+                parts.push(format!("ORDER BY {} ASC", row_id));
+            }
+        },
     }
     if let Some(f) = frame {
         parts.push(f.to_string());
@@ -127,7 +131,7 @@ fn window_sql(
     w: &WindowSpec,
     resolve: &dyn Fn(&str) -> String,
     order_type: Option<ColumnType>,
-    row_id: &str,
+    row_id: Option<&str>,
 ) -> Result<String, GenericSQLError> {
     // `range` frame interval arithmetic is defined on the order key's
     // units - the natural (`rowid`) fallback is meaningless for it, so an
@@ -266,6 +270,69 @@ pub(crate) fn quote_ident(name: &str) -> String {
     name.replace('"', "\"\"")
 }
 
+/// Renders an entity id as a SQL relation, verbatim when it is already a
+/// relation path of bare or quoted parts and quoted whole otherwise.
+pub(crate) fn entity_ref(id: &str) -> String {
+    if parse_relation_path(id).is_some() {
+        id.to_owned()
+    } else {
+        format!("\"{}\"", quote_ident(id))
+    }
+}
+
+pub(crate) fn is_bare_ident(part: &str) -> bool {
+    let mut chars = part.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+pub(crate) fn parse_relation_path(name: &str) -> Option<Vec<String>> {
+    let mut parts = vec![];
+    let mut chars = name.chars().peekable();
+    loop {
+        let mut part = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            loop {
+                match chars.next()? {
+                    '"' if chars.peek() == Some(&'"') => {
+                        chars.next();
+                        part.push('"');
+                    },
+                    '"' => break,
+                    c => part.push(c),
+                }
+            }
+
+            if part.is_empty() {
+                return None;
+            }
+        } else {
+            while let Some(&c) = chars.peek() {
+                if c == '.' {
+                    break;
+                }
+
+                part.push(c);
+                chars.next();
+            }
+
+            if !is_bare_ident(&part) {
+                return None;
+            }
+        }
+
+        parts.push(part);
+        match chars.next() {
+            None => return Some(parts),
+            Some('.') => continue,
+            Some(_) => return None,
+        }
+    }
+}
+
 fn quote_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
@@ -312,7 +379,7 @@ pub(crate) struct ViewQueryContext<'a> {
     like_escape_clause: Option<&'a str>,
     backslash_escaped_literals: bool,
     regex_fn: Option<&'a str>,
-    row_id_expr: &'a str,
+    row_id_expr: Option<&'a str>,
     row_path_aliases: Vec<String>,
 }
 
@@ -326,7 +393,9 @@ impl<'a> ViewQueryContext<'a> {
         table: &'a str,
         config: &'a ViewConfig,
         schema: &IndexMap<String, ColumnType>,
+        unordered: bool,
     ) -> Result<Self, GenericSQLError> {
+        let table = &entity_ref(table);
         let expressions = &config.expressions.0;
         let col_name_resolve = |col: &str| -> String {
             expressions
@@ -335,7 +404,11 @@ impl<'a> ViewQueryContext<'a> {
                 .unwrap_or_else(|| format!("\"{}\"", quote_ident(col)))
         };
 
-        let row_id_expr = model.0.row_id_expr.as_deref().unwrap_or("rowid");
+        let row_id_expr = if unordered || model.0.unordered.unwrap_or(false) {
+            None
+        } else {
+            Some(model.0.row_id_expr.as_deref().unwrap_or("rowid"))
+        };
 
         // Window columns materialize in a wrapping sub-select, so every
         // downstream clause (filter, group_by, aggregate, sort) sees them as
@@ -368,9 +441,13 @@ impl<'a> ViewQueryContext<'a> {
             // `SELECT *` into the sub-select, so the natural row order is
             // re-exported under an internal alias for the outer query's
             // `ORDER BY` (see [`Self::natural_order_col`]).
+            let row_id_select = row_id_expr
+                .map(|expr| format!("{} AS \"__PSP_ROWID__\", ", expr))
+                .unwrap_or_default();
+
             format!(
-                "(SELECT *, {} AS \"__PSP_ROWID__\", {} FROM {}) AS __PSP_WINDOW_SRC__",
-                row_id_expr,
+                "(SELECT *, {}{} FROM {}) AS __PSP_WINDOW_SRC__",
+                row_id_select,
                 selects.join(", "),
                 table
             )
@@ -404,11 +481,18 @@ impl<'a> ViewQueryContext<'a> {
 
     /// Builds the inner `SELECT` query (without the outer `CREATE TABLE`
     /// wrapper) for the four `group_by` x `split_by` combinations, appending
-    /// `WINDOW` and `ORDER BY` clauses as needed.
+    /// an `ORDER BY` clause as needed.
     pub(crate) fn build_query(&self) -> String {
+        self.build_query_ordered(true)
+    }
+
+    pub(crate) fn build_query_unordered(&self) -> String {
+        self.build_query_ordered(false)
+    }
+
+    fn build_query_ordered(&self, with_default_order: bool) -> String {
         let where_sql = self.where_sql();
         let order_by = self.order_by_clauses();
-        let windows = self.window_clauses();
         let mut query = match self.query_orientation() {
             QueryOrientation::Flat => {
                 let select = self.select_clauses().join(", ");
@@ -439,10 +523,12 @@ impl<'a> ViewQueryContext<'a> {
             QueryOrientation::Pivoted => {
                 let mut src_clauses = self.select_clauses();
                 src_clauses.extend(self.split_select_clauses());
-                src_clauses.push(format!(
-                    "ROW_NUMBER() OVER (ORDER BY {}) as \"__ROW_NUM__\"",
-                    self.pivot_row_num_order()
-                ));
+                src_clauses.push(match self.pivot_row_num_order() {
+                    Some(order) => {
+                        format!("ROW_NUMBER() OVER (ORDER BY {}) as \"__ROW_NUM__\"", order)
+                    },
+                    None => "ROW_NUMBER() OVER () as \"__ROW_NUM__\"".to_string(),
+                });
 
                 let src = format!(
                     "SELECT {} FROM {}{}",
@@ -640,12 +726,9 @@ impl<'a> ViewQueryContext<'a> {
             },
         };
 
-        if !windows.is_empty() {
-            query = format!("{} WINDOW {}", query, windows.join(", "));
-        }
-
         if !order_by.is_empty() {
             query = format!("{} ORDER BY {}", query, order_by.join(", "));
+        } else if !with_default_order {
         } else if self.is_flat_mode() && !self.config.group_by.is_empty() {
             let default_order: Vec<String> = self
                 .row_path_aliases
@@ -659,10 +742,12 @@ impl<'a> ViewQueryContext<'a> {
             let default_order = if self.config.split_by.is_empty() {
                 self.natural_order_col()
             } else {
-                "\"__ROW_NUM__\""
+                Some("\"__ROW_NUM__\"")
             };
 
-            query = format!("{} ORDER BY {}", query, default_order);
+            if let Some(default_order) = default_order {
+                query = format!("{} ORDER BY {}", query, default_order);
+            }
         }
 
         query
@@ -960,18 +1045,19 @@ impl<'a> ViewQueryContext<'a> {
     }
 
     /// The natural row-order column as visible to clauses that select `FROM
-    fn natural_order_col(&self) -> &str {
-        if self.config.windows.is_empty() {
-            self.row_id_expr
+    fn natural_order_col(&self) -> Option<&str> {
+        let row_id = self.row_id_expr?;
+        Some(if self.config.windows.is_empty() {
+            row_id
         } else {
             "\"__PSP_ROWID__\""
-        }
+        })
     }
 
     /// Builds the `ORDER BY` expression for the `ROW_NUMBER()` window
     /// function used inside `PIVOT` queries. Uses sort config if available,
     /// otherwise falls back to the natural row order.
-    fn pivot_row_num_order(&self) -> String {
+    fn pivot_row_num_order(&self) -> Option<String> {
         let sort_exprs: Vec<String> = self
             .config
             .sort
@@ -981,9 +1067,9 @@ impl<'a> ViewQueryContext<'a> {
             .collect();
 
         if sort_exprs.is_empty() {
-            self.natural_order_col().to_string()
+            self.natural_order_col().map(str::to_owned)
         } else {
-            sort_exprs.join(", ")
+            Some(sort_exprs.join(", "))
         }
     }
 
@@ -1037,8 +1123,10 @@ impl<'a> ViewQueryContext<'a> {
                                 clauses.push(format!("\"__SORT_{}__\" {}", sidx, dir));
                             } else {
                                 clauses.push(format!(
-                                    "first_value(\"__SORT_{}__\") OVER __WINDOW_{}__ {}",
-                                    sidx, gidx, dir
+                                    "first_value(\"__SORT_{}__\") OVER {} {}",
+                                    sidx,
+                                    self.window_spec(gidx),
+                                    dir
                                 ));
                             }
                         } else {
@@ -1052,10 +1140,10 @@ impl<'a> ViewQueryContext<'a> {
                                 ));
                             } else {
                                 clauses.push(format!(
-                                    "first_value({}({})) OVER __WINDOW_{}__ {}",
+                                    "first_value({}({})) OVER {} {}",
                                     agg,
                                     self.col_name(sort_col),
-                                    gidx,
+                                    self.window_spec(gidx),
                                     dir
                                 ));
                             }
@@ -1108,8 +1196,10 @@ impl<'a> ViewQueryContext<'a> {
                             clauses.push(format!("\"__SORT_{}__\" {}", sidx, dir));
                         } else {
                             clauses.push(format!(
-                                "first_value(\"__SORT_{}__\") OVER __WINDOW_{}__ {}",
-                                sidx, gidx, dir
+                                "first_value(\"__SORT_{}__\") OVER {} {}",
+                                sidx,
+                                self.window_spec(gidx),
+                                dir
                             ));
                         }
                     } else {
@@ -1118,10 +1208,10 @@ impl<'a> ViewQueryContext<'a> {
                             clauses.push(format!("{}({}) {}", agg, self.col_name(sort_col), dir));
                         } else {
                             clauses.push(format!(
-                                "first_value({}({})) OVER __WINDOW_{}__ {}",
+                                "first_value({}({})) OVER {} {}",
                                 agg,
                                 self.col_name(sort_col),
-                                gidx,
+                                self.window_spec(gidx),
                                 dir
                             ));
                         }
@@ -1142,60 +1232,48 @@ impl<'a> ViewQueryContext<'a> {
         clauses
     }
 
-    fn window_clauses(&self) -> Vec<String> {
-        if self.config.sort.is_empty() || self.config.group_by.len() <= 1 {
-            return Vec::new();
-        }
-
-        let mut clauses = Vec::new();
-        for gidx in 0..(self.config.group_by.len() - 1) {
-            let partition = self.row_path_aliases[..=gidx].join(", ");
-            if self.is_flat_mode() {
-                // Flat mode: partition by row path only (no GROUPING_ID)
-                if !self.config.split_by.is_empty() {
-                    let order = self.row_path_aliases.join(", ");
-                    clauses.push(format!(
-                        "__WINDOW_{}__ AS (PARTITION BY {} ORDER BY {})",
-                        gidx, partition, order,
-                    ));
-                } else {
-                    clauses.push(format!(
-                        "__WINDOW_{}__ AS (PARTITION BY {} ORDER BY {})",
-                        gidx,
-                        partition,
-                        self.group_col_names.join(", ")
-                    ));
-                }
-            } else if !self.config.split_by.is_empty() {
-                let shift = self.config.group_by.len() - 1 - gidx;
-                let grouping_expr = if shift > 0 {
-                    format!("(\"__GROUPING_ID__\" >> {})", shift)
-                } else {
-                    "\"__GROUPING_ID__\"".to_string()
-                };
-
-                let order = self.row_path_aliases.join(", ");
-                clauses.push(format!(
-                    "__WINDOW_{}__ AS (PARTITION BY {}, {} ORDER BY {})",
-                    gidx, grouping_expr, partition, order,
-                ));
-            } else {
-                let sub_groups = self.config.group_by[..=gidx]
-                    .iter()
-                    .map(|c| self.col_name(c))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                clauses.push(format!(
-                    "__WINDOW_{}__ AS (PARTITION BY {}({}), {} ORDER BY {})",
-                    gidx,
-                    self.grouping_fn,
-                    sub_groups,
+    /// Returns the inline window specification for the `gidx` group level's
+    /// sort.
+    fn window_spec(&self, gidx: usize) -> String {
+        let partition = self.row_path_aliases[..=gidx].join(", ");
+        let group_partition = self.group_col_names[..=gidx].join(", ");
+        if self.is_flat_mode() {
+            // Flat mode: partition by row path only (no GROUPING_ID)
+            if !self.config.split_by.is_empty() {
+                format!(
+                    "(PARTITION BY {} ORDER BY {})",
                     partition,
+                    self.row_path_aliases.join(", ")
+                )
+            } else {
+                format!(
+                    "(PARTITION BY {} ORDER BY {})",
+                    group_partition,
                     self.group_col_names.join(", ")
-                ));
+                )
             }
-        }
+        } else if !self.config.split_by.is_empty() {
+            let shift = self.config.group_by.len() - 1 - gidx;
+            let grouping_expr = if shift > 0 {
+                format!("(\"__GROUPING_ID__\" >> {})", shift)
+            } else {
+                "\"__GROUPING_ID__\"".to_string()
+            };
 
-        clauses
+            format!(
+                "(PARTITION BY {}, {} ORDER BY {})",
+                grouping_expr,
+                partition,
+                self.row_path_aliases.join(", ")
+            )
+        } else {
+            format!(
+                "(PARTITION BY {}({}), {} ORDER BY {})",
+                self.grouping_fn,
+                group_partition,
+                group_partition,
+                self.group_col_names.join(", ")
+            )
+        }
     }
 }

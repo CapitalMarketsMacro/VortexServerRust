@@ -22,6 +22,7 @@
 #include <perspective/data_slice.h>
 #include <perspective/table.h>
 #include <perspective/view_config.h>
+#include <perspective/scalar_json.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 #include <cstddef>
@@ -39,10 +40,15 @@ namespace perspective {
  */
 enum class t_arrow_compression : std::uint8_t { NONE, LZ4, ZSTD };
 
-void write_scalar(
-    t_tscalar scalar,
-    bool is_formatted,
-    rapidjson::Writer<rapidjson::StringBuffer>& writer
+struct t_stree_capture;
+struct t_stree_dropped;
+
+/**
+ * @brief Serialize `pkeys` of `table` as an Arrow IPC of one column per
+ * index column, named after it.
+ */
+PERSPECTIVE_EXPORT std::shared_ptr<std::string> pkeys_to_index_arrow(
+    const Table& table, const std::vector<t_tscalar>& pkeys
 );
 
 template <typename CTX_T>
@@ -191,6 +197,25 @@ public:
     ) const;
 
     /**
+     * @brief Write a primary key, decoding a composite key into an array.
+     */
+    void write_pkey(
+        const t_tscalar& scalar,
+        bool is_formatted,
+        rapidjson::Writer<rapidjson::StringBuffer>& writer
+    ) const;
+
+    /**
+     * @brief Write one `__ID__` row path entry, which is a primary key on a
+     * column-only view.
+     */
+    void write_id_entry(
+        const t_tscalar& scalar,
+        bool is_formatted,
+        rapidjson::Writer<rapidjson::StringBuffer>& writer
+    ) const;
+
+    /**
      * @brief Returns shared pointer to a t_data_slice object, which
      * contains the underlying slice of data as well as the metadata
      * required to interface with it.
@@ -333,6 +358,19 @@ public:
     bool _get_deltas_enabled() const;
     void _set_deltas_enabled(bool enabled_state);
 
+    /**
+     * @brief Record the rows which leave this `View`, for
+     * `take_removed_rows`.
+     */
+    void set_removes_enabled(bool enabled_state);
+
+    /**
+     * @brief The keys of the rows which left this `View` since the last call,
+     * as an Arrow IPC of one column per key column, or `nullptr` when none
+     * did.
+     */
+    std::shared_ptr<std::string> take_removed_rows();
+
     // Pivot table operations
 
     /**
@@ -433,8 +471,15 @@ private:
 
     void _find_hidden_sort(const std::vector<t_sortspec>& sort);
 
+    void attach_removes_capture();
+    void detach_removes_capture();
+    t_dtype row_pivot_dtype(const std::string& name) const;
+    std::shared_ptr<std::string>
+    dropped_to_arrow(const std::vector<t_stree_dropped>& dropped) const;
+
     std::shared_ptr<Table> m_table;
     std::shared_ptr<CTX_T> m_ctx;
+    std::shared_ptr<const t_pkey_codec> m_pkey_codec;
     std::string m_name;
     std::string m_separator;
 
@@ -453,6 +498,9 @@ private:
     bool m_split_rollup;
 
     std::shared_ptr<t_view_config> m_view_config;
+    std::shared_ptr<t_stree_capture> m_removes_capture;
+    t_uindex m_removes_generation = 0;
+    bool m_removes_enabled = false;
 };
 
 /**

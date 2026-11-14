@@ -11,7 +11,7 @@ on [Perspective](https://perspective.finos.org/) (a C++ analytics
 engine with Rust bindings). The Perspective engine lives in `Vortex/`
 as a dependency; the main application is at the repo root.
 
-The vendored engine is **Perspective v5.6.0** (`perspective`,
+The vendored engine is **Perspective v5.9.1** (`perspective`,
 `perspective-client`, `perspective-server` crates, taken from the crates.io
 tarballs) plus a small, documented set of local patches — see
 "Perspective fork: local patches & upgrade recipe" below before touching
@@ -128,7 +128,7 @@ perspective          (facade + Axum WebSocket server)
 
 ## Perspective fork: local patches & upgrade recipe
 
-`Vortex/crates/*` is upstream Perspective **v5.6.0** from the crates.io
+`Vortex/crates/*` is upstream Perspective **v5.9.1** from the crates.io
 tarballs (`https://static.crates.io/crates/<name>/<name>-<ver>.crate`), not
 a git subtree. Upstream builds its C++ deps from source with CMake
 ExternalProject; this repo replaces that with Conan pre-built binaries. The
@@ -167,7 +167,7 @@ upstream) is:
   `absl::string_view`); `view.cpp`'s `data_slice_to_arrow` only installs
   the LZ4 / ZSTD IPC codec when `arrow::util::Codec::Create` succeeds (see
   "Arrow IPC compression" under Key Patterns) instead of calling
-  `ValueUnsafe()` on an error `Result`. Upstream (still in 5.6.0) calls
+  `ValueUnsafe()` on an error `Result`. Upstream (still in 5.9.1) calls
   `ValueUnsafe()` unconditionally, so this hunk must be re-applied on every
   upgrade; `git merge-file` carries it over cleanly so far.
 - Rust (`src/ffi.rs`, `src/local_session.rs`, `src/server.rs`) — every call
@@ -192,7 +192,7 @@ ConanCenter ships pre-built. When upstream bumps a pin (check
 needed `exprtk/0.0.3` for `vector_access_runtime_check`.
 
 **Upgrade recipe** (what was done for 4.3.0 / client 4.4.0 → 5.3.1, and
-again for 5.3.1 → 5.5.1 and 5.5.1 → 5.6.0, where every upstream hunk 3-way
+again for 5.3.1 → 5.5.1, 5.5.1 → 5.6.0 and 5.6.0 → 5.9.1, where every upstream hunk 3-way
 merged cleanly with `git merge-file <vendored> <old tarball> <new tarball>`
 and no Conan requirement changed). On a Windows checkout (`autocrlf=true`)
 feed `git merge-file` the *blob* content (`git show HEAD:<path>`) as "ours",
@@ -212,11 +212,13 @@ not the CRLF working-tree file, or every line conflicts:
 4. Re-apply the three C++ source patches (grep for `PSP_ENABLE_CSV` and
    `ToString()`), then `cargo build -p vortex-server` and fix what the
    compiler reports. Expect only dependency-API drift: Arrow, re2, exprtk.
+   Also expect client-API drift in the app: 5.9.1 changed
+   `TableInitOptions.index` from `Option<String>` to `Option<TableIndex>`.
    Note `PSP_ENABLE_CSV` is never defined, so a botched CSV hunk is compiled
    out silently — diff `arrow_csv.cpp` / `view.cpp` against the tarball.
    Then `git add -A Vortex/crates/` and check `git status --short | grep '^??'`
    prints nothing: new upstream source files (5.6.0 added
-   `derived_source.{cpp,h}`) land on disk but `git commit -a` would not pick
+   `derived_source.{cpp,h}`, 5.9.1 `pkey_codec.{cpp,h}` + `scalar_json.h`) land on disk but `git commit -a` would not pick
    them up, and CMake already lists them, so the commit would not build.
 5. If a Conan requirement changes, update the lockfile *incrementally* (see
    "Updating the lockfile") and verify every profile still resolves
@@ -229,7 +231,7 @@ not the CRLF working-tree file, or every line conflicts:
 
 | Tool | Version | Why |
 |---|---|---|
-| Rust nightly-2026-01-01 | exact, pinned | `rust-toolchain.toml`; `rustfmt.toml` uses unstable features (import grouping, comment wrapping). Upstream 5.6.0 pins nightly-2026-10-01 but its crates build fine on this older nightly, so the enterprise toolchain pin is unchanged |
+| Rust nightly-2026-01-01 | exact, pinned | `rust-toolchain.toml`; `rustfmt.toml` uses unstable features (import grouping, comment wrapping). Upstream pins a newer nightly but its 5.9.1 crates build fine on this older nightly, so the enterprise toolchain pin is unchanged |
 | Conan 2.x | latest | C++ dependency manager for Vortex/ |
 | CMake 3.20+ | latest | C++ build |
 | C++17 compiler | latest | Xcode (macOS), GCC/Clang (Linux), MSVC 2022 (Windows) |
@@ -464,6 +466,7 @@ What's been validated end-to-end vs. what's pending:
 | `tests/ws_roundtrip.rs` + `perspective` concurrent test on 5.3.1 | — | — | — | ✅ verified (2026-09) |
 | Perspective **5.5.1** engine build (Conan, all pre-built) + `cargo test --workspace` + `perspective` concurrent test | — | — | ✅ verified (2026-10, gcc 13, lock resolves 100% pre-built) | ✅ build: CI 2026-10-06 (the workflow has no test step); `ws_roundtrip` + `perspective` concurrent test + clippy + strict-offline build locally 2026-10-20 |
 | Perspective **5.6.0** engine build (Conan, all pre-built, hermetic stage) + `ws_roundtrip` (incl. pivoted view) + `perspective` concurrent test + strict-offline build | — | — | ✅ CI 2026-10-21 on PR #8: build + `Verify C++ deps are pre-built` step (gcc 13; the workflow has no test step) | ✅ verified (2026-10-20) |
+| Perspective **5.9.1** engine build (Conan lock 100% pre-built, `--build=never` verify) + `cargo test --workspace` (incl. `ws_roundtrip`) + `perspective` concurrent test | — | — | ✅ verified (2026-11, gcc 13) | — |
 | NATS Core / JetStream / WebSocket ingress end-to-end on **5.6.0** (NATS: Python + Node sims, Core + JetStream; WebSocket: Python sim; `ws_probe` per table) | — | — | — | ✅ verified (2026-10-20) |
 | Solace ingress end-to-end | ✅ verified (500-msg burst) | — | — | ⊘ N/A (`solace-rs-sys` won't build on Windows; compiled out) |
 | NATS Core ingress end-to-end | ✅ verified | — | — | ✅ verified (table seeded; re-verified on 5.3.1, 2026-09: Python + Node sims, `ws_probe` reads 15 composite-key rows) |

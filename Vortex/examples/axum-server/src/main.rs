@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = server.new_local_client();
     let mut opts = TableInitOptions::default();
     opts.set_name("my_table");
-    opts.index = Some("instrument".to_string());
+    opts.index = Some("instrument".into());
 
     let table = client
         .table(UpdateData::JsonRows(market_rows_json(0)).into(), opts)

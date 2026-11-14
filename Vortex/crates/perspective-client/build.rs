@@ -61,8 +61,6 @@ fn prost_build() -> Result<()> {
                 "#[ts(type = \"Uint8Array | undefined\")]",
             )
             .field_attribute("ViewOnUpdateResp.delta", "#[serde(with = \"serde_bytes\")]")
-            .type_attribute("ViewOnRemoveResp", "#[derive(ts_rs::TS)]")
-            .field_attribute("ViewOnRemoveResp.indices", "#[ts(type = \"Uint8Array\")]")
             .field_attribute(
                 "ViewOnRemoveResp.indices",
                 "#[serde(with = \"serde_bytes\")]",
@@ -74,6 +72,14 @@ fn prost_build() -> Result<()> {
             )
             .type_attribute(
                 "ListFlatten",
+                "#[derive(serde::Deserialize, ts_rs::TS)] #[serde(rename_all = \"snake_case\")]",
+            )
+            .type_attribute(
+                "StructFlatten",
+                "#[derive(serde::Deserialize, ts_rs::TS)] #[serde(rename_all = \"snake_case\")]",
+            )
+            .type_attribute(
+                "MapFlatten",
                 "#[derive(serde::Deserialize, ts_rs::TS)] #[serde(rename_all = \"snake_case\")]",
             )
             .field_attribute("ViewToArrowResp.arrow", "#[serde(skip)]")

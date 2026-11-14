@@ -878,7 +878,9 @@ ServerResources::table_has_on_remove_subs(const t_id& table_id) {
     auto range = m_table_to_view.equal_range(table_id);
     for (auto it = range.first; it != range.second; ++it) {
         auto subs = m_view_on_remove_subs.find(it->second);
-        if (subs != m_view_on_remove_subs.end() && !subs->second.empty()) {
+        auto view = m_views.find(it->second);
+        if (subs != m_view_on_remove_subs.end() && !subs->second.empty()
+            && view != m_views.end() && view->second->sides() == 0) {
             return true;
         }
     }
@@ -2237,6 +2239,8 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             features->set_on_update(true);
             features->set_expressions(true);
             features->set_view_derivations(true);
+            features->set_expand_collapse(true);
+            features->set_update(true);
 
             const auto window_agg = [](const char* name,
                                         std::initializer_list<const char*> frames,
@@ -2497,8 +2501,8 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                     v->set_entity_id(name);
                     const auto tbl = m_resources.get_table(name);
 
-                    if (!tbl->get_index().empty()) {
-                        v->set_index(tbl->get_index());
+                    for (const auto& name : tbl->get_index()) {
+                        v->add_index(name);
                     }
 
                     if (tbl->get_limit() != std::numeric_limits<int>::max()) {
@@ -2536,7 +2540,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                 break;
             }
 
-            std::string index;
+            std::vector<std::string> index;
             std::uint32_t limit = std::numeric_limits<int>::max();
             bool has_limit = false;
             std::string make_error;
@@ -2548,7 +2552,14 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                     break;
                 }
                 case proto::MakeTableReq_MakeTableOptions::kMakeIndexTable: {
-                    index = r.options().make_index_table();
+                    index.push_back(r.options().make_index_table());
+                    break;
+                }
+                case proto::MakeTableReq_MakeTableOptions::
+                    kMakeCompositeIndexTable: {
+                    const auto& columns =
+                        r.options().make_composite_index_table().columns();
+                    index.assign(columns.begin(), columns.end());
                     break;
                 }
                 case proto::MakeTableReq_MakeTableOptions::
@@ -2563,18 +2574,62 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                 ? BACKING_STORE_DISK
                 : BACKING_STORE_MEMORY;
 
-            apachearrow::t_list_flatten list_flatten;
+            t_flatten_mode flatten;
             switch (r.options().list_flatten()) {
                 case proto::LIST_FLATTEN_CARTESIAN:
-                    list_flatten = apachearrow::LIST_FLATTEN_CARTESIAN;
+                    flatten.list = LIST_FLATTEN_CARTESIAN;
                     break;
                 case proto::LIST_FLATTEN_STRINGIFY:
-                    list_flatten = apachearrow::LIST_FLATTEN_STRINGIFY;
+                    flatten.list = LIST_FLATTEN_STRINGIFY;
+                    break;
+                case proto::LIST_FLATTEN_STRINGIFY_FORMATTED:
+                    flatten.list = LIST_FLATTEN_STRINGIFY_FORMATTED;
                     break;
                 case proto::LIST_FLATTEN_ZIP:
                 default:
-                    list_flatten = apachearrow::LIST_FLATTEN_ZIP;
+                    flatten.list = LIST_FLATTEN_ZIP;
                     break;
+            }
+
+            switch (r.options().struct_flatten()) {
+                case proto::STRUCT_FLATTEN_STRINGIFY:
+                    flatten.structs = STRUCT_FLATTEN_STRINGIFY;
+                    break;
+                case proto::STRUCT_FLATTEN_STRINGIFY_FORMATTED:
+                    flatten.structs = STRUCT_FLATTEN_STRINGIFY_FORMATTED;
+                    break;
+                case proto::STRUCT_FLATTEN_PIVOT:
+                default:
+                    flatten.structs = STRUCT_FLATTEN_PIVOT;
+                    break;
+            }
+
+            if (!r.options().has_map_flatten()) {
+                switch (flatten.structs) {
+                    case STRUCT_FLATTEN_STRINGIFY:
+                        flatten.maps = MAP_FLATTEN_STRINGIFY;
+                        break;
+                    case STRUCT_FLATTEN_STRINGIFY_FORMATTED:
+                        flatten.maps = MAP_FLATTEN_STRINGIFY_FORMATTED;
+                        break;
+                    case STRUCT_FLATTEN_PIVOT:
+                    default:
+                        flatten.maps = MAP_FLATTEN_PIVOT;
+                        break;
+                }
+            } else {
+                switch (r.options().map_flatten()) {
+                    case proto::MAP_FLATTEN_STRINGIFY:
+                        flatten.maps = MAP_FLATTEN_STRINGIFY;
+                        break;
+                    case proto::MAP_FLATTEN_STRINGIFY_FORMATTED:
+                        flatten.maps = MAP_FLATTEN_STRINGIFY_FORMATTED;
+                        break;
+                    case proto::MAP_FLATTEN_PIVOT:
+                    default:
+                        flatten.maps = MAP_FLATTEN_PIVOT;
+                        break;
+                }
             }
 
             if (r.options().has_view_schema()
@@ -2589,7 +2644,12 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             switch (r.data().data_case()) {
                 case proto::MakeTableData::kFromView: {
                     make_error = make_derived_table(
-                        r, entity_id, !index.empty() || has_limit, proto_resp, table
+                        r,
+                        entity_id,
+                        !index.empty() || has_limit,
+                        backing_store,
+                        proto_resp,
+                        table
                     );
                     break;
                 }
@@ -2602,7 +2662,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                         std::move(data),
                         limit,
                         backing_store,
-                        list_flatten
+                        flatten
                     );
                     break;
                 }
@@ -2615,7 +2675,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                         std::move(data),
                         limit,
                         backing_store,
-                        list_flatten
+                        flatten
                     );
                     break;
                 }
@@ -2628,7 +2688,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                         std::move(data),
                         limit,
                         backing_store,
-                        list_flatten
+                        flatten
                     );
                     break;
                 }
@@ -2641,7 +2701,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                         std::move(data),
                         limit,
                         backing_store,
-                        list_flatten
+                        flatten
                     );
                     break;
                 }
@@ -2654,7 +2714,7 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
                         std::move(data),
                         limit,
                         backing_store,
-                        list_flatten
+                        flatten
                     );
                     break;
                 }
@@ -2669,7 +2729,11 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
 
                     t_schema table_schema(columns, types);
                     table = Table::from_schema(
-                        index, table_schema, limit, backing_store
+                        index,
+                        table_schema,
+                        limit,
+                        backing_store,
+                        flatten
                     );
                     break;
                 }
@@ -3104,9 +3168,10 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             sub_info.id = req.msg_id();
             sub_info.client_id = client_id;
             m_resources.create_view_on_remove_sub(req.entity_id(), sub_info);
+            m_resources.get_view(req.entity_id())->set_removes_enabled(true);
             auto table_id = m_resources.get_table_id_for_view(req.entity_id());
             m_resources.get_table(table_id)->get_gnode()->set_removes_enabled(
-                true
+                m_resources.table_has_on_remove_subs(table_id)
             );
             break;
         }
@@ -3115,6 +3180,12 @@ ProtoServer::_handle_request(std::uint32_t client_id, Request&& req) {
             m_resources.remove_view_on_remove_sub(
                 req.entity_id(), sub_id, client_id
             );
+            const auto& view_id = req.entity_id();
+            if (m_resources.has_view(view_id)
+                && m_resources.get_view_on_remove_sub(view_id).empty()) {
+                m_resources.get_view(view_id)->set_removes_enabled(false);
+            }
+
             auto table_id = m_resources.get_table_id_for_view(req.entity_id());
             m_resources.get_table(table_id)->get_gnode()->set_removes_enabled(
                 m_resources.table_has_on_remove_subs(table_id)
@@ -3941,6 +4012,21 @@ ProtoServer::_poll() {
     return resp_envs;
 }
 
+static std::shared_ptr<std::string>
+removed_keys_to_arrow(
+    const std::shared_ptr<Table>& table,
+    const std::shared_ptr<t_data_table>& removed
+) {
+    const auto pkey = removed->get_const_column("psp_pkey");
+    std::vector<t_tscalar> pkeys;
+    pkeys.reserve(removed->size());
+    for (t_uindex ridx = 0; ridx < removed->size(); ++ridx) {
+        pkeys.push_back(pkey->get_scalar(ridx));
+    }
+
+    return pkeys_to_index_arrow(*table, pkeys);
+}
+
 void
 ProtoServer::_notify_table(
     std::shared_ptr<Table>& table,
@@ -3961,27 +4047,41 @@ ProtoServer::_notify_table(
         }
 
         auto view = m_resources.get_view(view_id);
-        if (has_removes) {
-            auto remove_subs = m_resources.get_view_on_remove_sub(view_id);
-            if (!remove_subs.empty() && !removed_indices) {
-                removed_indices = apachearrow::column_to_arrow_ipc(
-                    *removed->get_const_column("psp_pkey"),
-                    table->get_index(),
-                    removed->size()
-                );
+        auto remove_subs = m_resources.get_view_on_remove_sub(view_id);
+        if (!remove_subs.empty()) {
+            const bool flat = view->sides() == 0;
+            auto emit = [&](const std::shared_ptr<std::string>& indices,
+                            proto::ViewOnRemoveResp::Cause cause) {
+                for (auto& subscription : remove_subs) {
+                    Response out;
+                    out.set_msg_id(subscription.id);
+                    out.set_entity_id(view_id);
+                    auto* r = out.mutable_view_on_remove_resp();
+                    r->set_port_id(port_id);
+                    r->set_cause(cause);
+                    *r->mutable_indices() = *indices;
+                    ProtoServerResp<proto::Response> resp2;
+                    resp2.data = std::move(out);
+                    resp2.client_id = subscription.client_id;
+                    outs.emplace_back(std::move(resp2));
+                }
+            };
+
+            if (flat && has_removes) {
+                if (!removed_indices) {
+                    removed_indices = removed_keys_to_arrow(table, removed);
+                }
+
+                emit(removed_indices, proto::ViewOnRemoveResp::KEY);
             }
 
-            for (auto& subscription : remove_subs) {
-                Response out;
-                out.set_msg_id(subscription.id);
-                out.set_entity_id(view_id);
-                auto* r = out.mutable_view_on_remove_resp();
-                r->set_port_id(port_id);
-                *r->mutable_indices() = *removed_indices;
-                ProtoServerResp<proto::Response> resp2;
-                resp2.data = std::move(out);
-                resp2.client_id = subscription.client_id;
-                outs.emplace_back(std::move(resp2));
+            auto left = view->take_removed_rows();
+            if (left) {
+                emit(
+                    left,
+                    flat ? proto::ViewOnRemoveResp::FILTER
+                         : proto::ViewOnRemoveResp::GROUP
+                );
             }
         }
 
@@ -3992,6 +4092,7 @@ ProtoServer::_notify_table(
             out.set_entity_id(view_id);
             auto* r = out.mutable_view_on_update_resp();
             r->set_port_id(port_id);
+            r->set_reset(table->get_gnode()->get_was_reset());
             if (view->get_deltas_enabled()) {
                 *r->mutable_delta() = *view->get_row_delta_as_arrow();
             }
@@ -4021,6 +4122,7 @@ ProtoServer::make_derived_table(
     const proto::MakeTableReq& req,
     const ServerResources::t_id& table_id,
     bool has_identity_options,
+    t_backing_store backing_store,
     std::vector<ProtoServerResp<ProtoServer::Response>>& outs,
     std::shared_ptr<Table>& table
 ) {
@@ -4069,8 +4171,21 @@ ProtoServer::make_derived_table(
         schema = t_schema(names, types);
     }
 
+    std::vector<std::string> index = source->index();
+    for (const auto& name : index) {
+        if (!schema.has_column(name)) {
+            index.clear();
+            break;
+        }
+    }
+
     table = Table::make_derived(
-        schema, source->pkey_dtype(), source->index(), source->limit()
+        schema,
+        source->pkey_dtype(),
+        index,
+        source->limit(),
+        source->pkey_codec(),
+        backing_store
     );
 
 #ifdef PSP_PARALLEL_FOR

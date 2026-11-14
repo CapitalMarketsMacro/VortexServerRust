@@ -4,7 +4,7 @@ from conan.tools.cmake import cmake_layout
 
 class PerspectiveServerConan(ConanFile):
     name = "perspective-server"
-    version = "5.6.0"
+    version = "5.9.1"
     settings = "os", "compiler", "build_type", "arch"
     generators = "CMakeToolchain", "CMakeDeps", "VirtualBuildEnv"
 

@@ -251,6 +251,10 @@ namespace server {
         [[nodiscard]]
         virtual bool get_deltas_enabled() const = 0;
 
+        virtual void set_removes_enabled(bool enabled_state) = 0;
+        [[nodiscard]]
+        virtual std::shared_ptr<std::string> take_removed_rows() = 0;
+
         virtual t_index collapse(std::int32_t row_idx) = 0;
 
         virtual t_index expand(std::int32_t row_idx) = 0;
@@ -459,7 +463,7 @@ namespace server {
         get_row_delta_as_arrow() const override {
             auto delta = m_view->get_row_delta();
             return m_view->data_slice_to_arrow(
-                delta, false, t_arrow_compression::NONE
+                delta, true, t_arrow_compression::NONE
             );
         }
 
@@ -472,6 +476,17 @@ namespace server {
         bool
         get_deltas_enabled() const override {
             return m_view->get_context()->get_deltas_enabled();
+        }
+
+        void
+        set_removes_enabled(bool enabled_state) override {
+            m_view->set_removes_enabled(enabled_state);
+        }
+
+        [[nodiscard]]
+        std::shared_ptr<std::string>
+        take_removed_rows() override {
+            return m_view->take_removed_rows();
         }
 
         t_index
@@ -756,6 +771,7 @@ namespace server {
             const proto::MakeTableReq& req,
             const ServerResources::t_id& table_id,
             bool has_identity_options,
+            t_backing_store backing_store,
             std::vector<ProtoServerResp<Response>>& outs,
             std::shared_ptr<Table>& table
         );

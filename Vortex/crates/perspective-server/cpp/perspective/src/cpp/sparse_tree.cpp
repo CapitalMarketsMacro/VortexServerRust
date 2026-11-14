@@ -214,6 +214,19 @@ t_stree::get_sortby_value(t_index idx) const {
 
 namespace {
 
+/// Removes every non-valid scalar so order statistics see only real values.
+void
+drop_invalid(std::vector<t_tscalar>& values) {
+    values.erase(
+        std::remove_if(
+            values.begin(),
+            values.end(),
+            [](const t_tscalar& value) { return !value.is_valid(); }
+        ),
+        values.end()
+    );
+}
+
 /// The strand delta dtype for a source column, signed for unsigned sources.
 t_dtype
 strand_value_dtype(t_dtype dtype) {
@@ -528,6 +541,7 @@ t_stree::build_strand_table_metadata(
  * @param prev
  * @param current
  * @param transitions
+ * @param existed
  * @param aggspecs
  * @param config
  * @return std::pair<std::shared_ptr<t_data_table>,
@@ -539,6 +553,7 @@ t_stree::build_strand_table(
     const t_data_table& prev,
     const t_data_table& current,
     const t_data_table& transitions,
+    const t_data_table& existed,
     const std::vector<t_aggspec>& aggspecs,
     const t_config& config
 ) const {
@@ -624,11 +639,13 @@ t_stree::build_strand_table(
 
     bool has_filters = config.has_filters();
     const std::uint8_t* op_base = op_col->get_nth_base<std::uint8_t>();
+    const t_column* existed_col = existed._get_const_column("psp_existed");
 
     if (has_filters) {
         for (t_uindex idx = 0, loop_end = flattened.size(); idx < loop_end;
              ++idx) {
-            bool filter_prev = msk_prev.get(idx);
+            bool filter_prev =
+                msk_prev.get(idx) && *(existed_col->get_nth<bool>(idx));
             bool filter_curr = msk_curr.get(idx);
 
             t_tscalar pkey = pkey_col->get_scalar(idx);
@@ -1020,9 +1037,17 @@ t_stree::update_shape_from_static(const t_dtree_ctx& ctx) {
         t_tscalar value =
             m_symtable.get_interned_tscalar(dtree.get_value(filter, dptidx));
 
+        if (!value.is_valid()) {
+            value = mknull(value.get_dtype());
+        }
+
         t_tscalar sortby_value = m_symtable.get_interned_tscalar(
             dtree.get_sortby_value(filter, dptidx)
         );
+
+        if (!sortby_value.is_valid()) {
+            sortby_value = mknull(sortby_value.get_dtype());
+        }
 
         t_uindex src_ridx = dptidx;
 
@@ -1053,7 +1078,9 @@ t_stree::update_shape_from_static(const t_dtree_ctx& ctx) {
 
             m_newids.insert(sptidx);
             for (const auto& capture : m_captures) {
-                capture->m_created.push_back(sptidx);
+                if (!capture->m_dropped_only) {
+                    capture->m_created.push_back(sptidx);
+                }
             }
 
             if (ndepth == dtree.last_level()) {
@@ -1821,6 +1848,13 @@ t_stree::update_agg_table(
                     values
                 );
 
+                drop_invalid(values);
+                if (values.empty()) {
+                    new_value.set(mknull(dst->get_dtype()));
+                    dst->set_scalar(dst_ridx, new_value);
+                    break;
+                }
+
                 new_value.set(*std::max_element(values.begin(), values.end()));
                 dst->set_scalar(dst_ridx, new_value);
             } break;
@@ -1881,6 +1915,13 @@ t_stree::update_agg_table(
                     values
                 );
 
+                drop_invalid(values);
+                if (values.empty()) {
+                    new_value.set(mknull(dst->get_dtype()));
+                    dst->set_scalar(dst_ridx, new_value);
+                    break;
+                }
+
                 new_value.set(*std::min_element(values.begin(), values.end()));
                 dst->set_scalar(dst_ridx, new_value);
             } break;
@@ -1928,10 +1969,15 @@ t_stree::update_agg_table(
                 t_tscalar dst_scalar = dst->get_scalar(dst_ridx);
 
                 old_value.set(dst_scalar);
-                new_value.set(src_scalar);
 
-                if (dst_scalar.is_valid()) {
+                if (!src_scalar.is_valid()) {
+                    new_value.set(
+                        is_new ? mknull(dst->get_dtype()) : dst_scalar
+                    );
+                } else if (!is_new && dst_scalar.is_valid()) {
                     new_value.set(std::max(dst_scalar, src_scalar));
+                } else {
+                    new_value.set(src_scalar);
                 }
 
                 dst->set_scalar(dst_ridx, new_value);
@@ -1941,11 +1987,17 @@ t_stree::update_agg_table(
                 t_tscalar dst_scalar = dst->get_scalar(dst_ridx);
 
                 old_value.set(dst_scalar);
-                new_value.set(src_scalar);
 
-                if (dst_scalar.is_valid()) {
+                if (!src_scalar.is_valid()) {
+                    new_value.set(
+                        is_new ? mknull(dst->get_dtype()) : dst_scalar
+                    );
+                } else if (!is_new && dst_scalar.is_valid()) {
                     new_value.set(std::min(dst_scalar, src_scalar));
+                } else {
+                    new_value.set(src_scalar);
                 }
+
                 dst->set_scalar(dst_ridx, new_value);
             } break;
             case AGGTYPE_HIGH_MINUS_LOW: {
@@ -1960,6 +2012,14 @@ t_stree::update_agg_table(
                     pkeys,
                     values
                 );
+
+                drop_invalid(values);
+                if (values.empty()) {
+                    new_value.set(mknull(dst->get_dtype()));
+                    dst->set_scalar(dst_ridx, new_value);
+                    break;
+                }
+
                 auto low_high =
                     std::minmax_element(values.begin(), values.end());
                 t_tscalar first;
@@ -2323,7 +2383,7 @@ t_stree::update_agg_table(
             ));
         }
 
-        if (!m_captures.empty()
+        if (m_captures_want_changes
             && (val_neq || old_value.is_valid() != dst->is_valid(dst_ridx))) {
             capture_change(nidx, idx, old_value);
         }
@@ -2807,6 +2867,7 @@ t_stree::get_aggregate(t_index idx, t_index aggnum) const {
 
 t_tscalar
 t_stree::get_aggregate_median(std::vector<t_tscalar>& values, float n) const {
+    drop_invalid(values);
     const auto size = values.size();
     const float raw_size = static_cast<float>(size) * n;
     bool is_even_size = fabsf(roundf(raw_size) - raw_size) <= 0.00001;
@@ -2874,6 +2935,8 @@ t_stree::set_deltas_enabled(bool enabled_state) {
 void
 t_stree::add_capture(const std::shared_ptr<t_stree_capture>& capture) {
     m_captures.push_back(capture);
+    m_captures_want_changes =
+        m_captures_want_changes || !capture->m_dropped_only;
 }
 
 void
@@ -2881,6 +2944,11 @@ t_stree::remove_capture(const std::shared_ptr<t_stree_capture>& capture) {
     m_captures.erase(
         std::remove(m_captures.begin(), m_captures.end(), capture),
         m_captures.end()
+    );
+    m_captures_want_changes = std::any_of(
+        m_captures.begin(),
+        m_captures.end(),
+        [](const auto& remaining) { return !remaining->m_dropped_only; }
     );
 }
 
@@ -2908,6 +2976,10 @@ t_stree::capture_change(
     t_uindex nidx, t_uindex aggnum, const t_tscalar& old_value
 ) {
     for (const auto& capture : m_captures) {
+        if (capture->m_dropped_only) {
+            continue;
+        }
+
         auto& cells = capture->m_changed[nidx];
         bool seen = false;
         for (const auto& cell : cells) {
@@ -2928,9 +3000,11 @@ t_stree::capture_dropped(const t_stnode& node) {
     dropped.m_depth = node.m_depth;
     get_path(node.m_idx, dropped.m_path);
     std::reverse(dropped.m_path.begin(), dropped.m_path.end());
-    dropped.m_aggregates.reserve(m_aggcols.size());
-    for (t_uindex aggnum = 0; aggnum < m_aggcols.size(); ++aggnum) {
-        dropped.m_aggregates.push_back(get_aggregate(node.m_idx, aggnum));
+    if (m_captures_want_changes) {
+        dropped.m_aggregates.reserve(m_aggcols.size());
+        for (t_uindex aggnum = 0; aggnum < m_aggcols.size(); ++aggnum) {
+            dropped.m_aggregates.push_back(get_aggregate(node.m_idx, aggnum));
+        }
     }
 
     for (const auto& capture : m_captures) {
